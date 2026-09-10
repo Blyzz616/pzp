@@ -1,0 +1,14 @@
+[Unit]
+Description=PZ Panel - mod update check and sync restart
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pzserver
+WorkingDirectory=/opt/pzp
+ExecStart=/usr/bin/python3 /opt/pzp/mod_restart.py
+# A postponed restart sleeps inside this same process for up to ~25
+# hours (see countdown_control.compute_postpone_options). systemd's
+# default oneshot start timeout would otherwise kill it mid-sleep.
+# UNVERIFIED until a real postponement is tested end to end.
+TimeoutStartSec=27h

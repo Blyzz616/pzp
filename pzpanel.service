@@ -1,0 +1,20 @@
+[Unit]
+Description=PZ Panel - web UI for Project Zomboid server management
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pzserver
+WorkingDirectory=/opt/pzp
+ExecStart=/opt/pzp/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+# Backstop for the console SSE stream: main.py now exits that loop
+# promptly on shutdown/disconnect (see _shutting_down in main.py), but
+# this bounds the worst case if that ever has a gap, instead of the
+# ~90s default wait observed before the fix.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

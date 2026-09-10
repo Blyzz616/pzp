@@ -1,4 +1,4 @@
-# PZ Panel
+# PZ Panel &nbsp;·&nbsp; v4.0.1
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
 
@@ -33,7 +33,7 @@ These instructions assume your PZ server runs as user `pzserver` under systemd, 
 
 ```bash
 cd /opt
-sudo git clone https://github.com/Blyzz616/pzpanel.git pzp
+sudo git clone https://github.com/Blyzz616/pzp.git pzp
 sudo chown -R pzserver:pzserver /opt/pzp
 ```
 
@@ -63,14 +63,17 @@ At minimum, set these values:
 password = your_rcon_password_here
 
 [paths]
-server_ini    = /home/pzserver/Zomboid/Server/realm.ini
+; Your server .ini can be named anything -- servertest.ini is the PZ default.
+; Point this at whatever yours is called.
+server_ini    = /home/pzserver/Zomboid/Server/servertest.ini
 workshop_acf  = /home/pzserver/pzserver/steamapps/workshop/appworkshop_108600.acf
 console_log   = /home/pzserver/Zomboid/server-console.txt
 
 [server]
-name = Realm
 unit = pzserver
 ```
+
+The panel reads its display name from `PublicName` in your server `.ini` automatically, so you don't need to set `[server] name` unless you want a fallback for when the ini isn't configured yet.
 
 Use the **Settings page** (cog icon) in the browser to configure optional features (Discord, Steam enrichment, kill tracking) after the panel is running. The **Find** and **Derive** buttons on the Settings page can locate your paths automatically if you're unsure.
 
@@ -85,7 +88,7 @@ sudo systemctl enable pzpanel
 sudo systemctl start pzpanel
 ```
 
-The panel will be available at **http://your-server-ip:8000**.
+The panel will be available at **http://your-server-ip:8080**.
 
 ### 5. (Optional) Set up graceful server stop
 
@@ -134,7 +137,7 @@ Download and install Python 3.10 or newer from [python.org](https://www.python.o
 Either clone with Git:
 
 ```
-git clone https://github.com/Blyzz616/pzpanel.git pzpanel
+git clone https://github.com/Blyzz616/pzp.git pzpanel
 ```
 
 Or download and extract the ZIP from GitHub (green **Code** button → **Download ZIP**).
@@ -158,12 +161,13 @@ Open `pzpanel.ini` in any text editor (Notepad works). At minimum, set:
 password = your_rcon_password_here
 
 [paths]
-server_ini   = C:\Users\YourName\Zomboid\Server\realm.ini
+; Your server .ini can be named anything -- servertest.ini is the PZ default.
+; Point this at whatever yours is called.
+server_ini   = C:\Users\YourName\Zomboid\Server\servertest.ini
 workshop_acf = C:\steamcmd\steamapps\workshop\appworkshop_108600.acf
 console_log  = C:\Users\YourName\Zomboid\server-console.txt
 
 [server]
-name = Realm
 ; Choose one:
 windows_mode = sc       ; if your PZ server runs as a Windows service
 ; windows_mode = process  ; if you launch PZ server from a batch file
@@ -173,7 +177,7 @@ windows_mode = sc       ; if your PZ server runs as a Windows service
 ```
 
 **Finding your paths:**
-- `server_ini` — look in `%USERPROFILE%\Zomboid\Server\` for a `.ini` file named after your world
+- `server_ini` — look in `%USERPROFILE%\Zomboid\Server\` for a `.ini` file (usually `servertest.ini` unless you've renamed it)
 - `workshop_acf` — look in your SteamCMD folder under `steamapps\workshop\appworkshop_108600.acf`
 - `console_log` — look in `%USERPROFILE%\Zomboid\server-console.txt`
 
@@ -198,7 +202,7 @@ pzpanel will launch and track the server process itself. Set `windows_start_scri
 
 ### 6. Start the panel
 
-Run `pzpanel_windows.bat` again (or keep the window from step 3 open). The panel will be available at **http://localhost:8000**.
+Run `pzpanel_windows.bat` again (or keep the window from step 3 open). The panel will be available at **http://localhost:8080**.
 
 To access the panel from other devices on your network, use your PC's local IP address instead of `localhost`.
 
@@ -270,10 +274,10 @@ api_key = your_steam_api_key_here
 
 ## Accessing the panel remotely
 
-The panel binds to port **8000** by default. To access it from outside your local network:
+The panel binds to port **8080** by default. To access it from outside your local network:
 
-- Open port 8000 on your firewall/router (TCP)
-- Navigate to `http://your-server-ip:8000`
+- Open port 8080 on your firewall/router (TCP)
+- Navigate to `http://your-server-ip:8080`
 
 There is currently no built-in authentication — it is recommended to restrict access via firewall rules or a reverse proxy (nginx/Caddy) if your server is publicly accessible.
 
@@ -286,9 +290,13 @@ There is currently no built-in authentication — it is recommended to restrict 
 - On Linux: `sudo journalctl -u pzpanel -n 50`
 - On Windows: run `pzpanel_windows.bat` from a Command Prompt to see error output
 
+**Server name shows as "PZ Server" instead of your world name**
+- Set `server_ini` in the Settings page to point at your world's `.ini` file
+- The panel reads `PublicName` from that file automatically — no need to set `[server] name` manually
+
 **"Could not check mods" error**
 - Verify `workshop_acf` points to the correct `appworkshop_108600.acf` file
-- Verify `server_ini` points to your world's `.ini` file
+- Verify `server_ini` points to your world's `.ini` file (it can be named anything)
 - Use the **Find** buttons on the Settings page to locate them automatically
 
 **Server status shows STARTING but never goes ONLINE**
@@ -331,6 +339,6 @@ There is currently no built-in authentication — it is recommended to restrict 
 
 ## Version
 
-**v4.0.0** — Cross-platform release (Linux + Windows)
+**v4.0.1** — port unified to 8080, server name derived from world `.ini` file
 
 See `CHANGELOG.md` for full history.

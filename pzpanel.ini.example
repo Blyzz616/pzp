@@ -1,0 +1,97 @@
+[rcon]
+host = 127.0.0.1
+port = 27015
+password = CHANGEME
+
+[paths]
+# Linux example:
+#   server_ini = /home/pzserver/Zomboid/Server/realm.ini
+# Windows example:
+#   server_ini = C:\Users\YourName\Zomboid\Server\realm.ini
+server_ini =
+
+# Linux example:
+#   workshop_acf = /home/pzserver/pzserver/steamapps/workshop/appworkshop_108600.acf
+# Windows example:
+#   workshop_acf = C:\steamcmd\steamapps\workshop\appworkshop_108600.acf
+workshop_acf =
+
+# Linux example:
+#   console_log = /home/pzserver/Zomboid/server-console.txt
+# Windows example:
+#   console_log = C:\Users\YourName\Zomboid\server-console.txt
+console_log =
+
+# OPTIONAL -- enables the Status page's "Danger Zone" (Wipe World & Reset).
+# Stops the server and PERMANENTLY DELETES this exact directory.
+# Leave empty/omit to keep that section hidden entirely (safe by default).
+# Linux:   multiplayer_save_dir = /home/pzserver/Zomboid/Saves/Multiplayer/realm
+# Windows: multiplayer_save_dir = C:\Users\YourName\Zomboid\Saves\Multiplayer\realm
+# multiplayer_save_dir =
+
+[discord]
+# Shared by mod-update/restart announcements (mod_restart.py) AND the
+# player-event watcher's join/leave/death embeds. One webhook, one
+# config value -- leave CHANGEME/empty to skip Discord posting entirely.
+# Note: leaving this empty does NOT disable the /killboard page or the
+# underlying join/leave/death/kill tracking -- those always run as long
+# as pzpanel.ini is readable. This only gates whether events get posted
+# to Discord.
+webhook_url = CHANGEME
+
+[server]
+# Display name shown in the panel UI. Purely cosmetic (e.g. "Realm").
+name = Realm
+
+# Linux: systemd unit name (e.g. "pzserver" -- must match pzserver.service).
+# Windows sc mode: Windows service name (as registered with sc.exe or NSSM).
+# Windows process mode: not used.
+unit = pzserver
+
+# Windows only -- how to control the PZ server process.
+# Options:
+#   sc       -- Windows Service (sc start/stop <service>). Requires the
+#               server to be registered as a Windows service. Recommended
+#               for production Windows installs.
+#   process  -- Bare process. pzpanel spawns and tracks the server itself
+#               using windows_start_script below. Simpler, no service setup.
+# Ignored on Linux.
+windows_mode = sc
+
+# Windows process mode only -- path to the batch file or exe that launches
+# the PZ dedicated server. Ignored on Linux and in sc mode.
+# Example: windows_start_script = C:\pzserver\StartServer64.bat
+# windows_start_script =
+
+[player_events]
+# Settings for join/leave/death tracking and the /killboard page.
+# Omit entirely for sane defaults.
+
+# Linux default:   /opt/pzp/player_events_state.json
+# Windows default: %LOCALAPPDATA%\pzpanel\player_events_state.json
+# state_file =
+
+# Linux default:   /opt/pzp/player_db.sqlite
+# Windows default: %LOCALAPPDATA%\pzpanel\player_db.sqlite
+# player_db =
+
+# How often (seconds) the watcher polls log files.
+poll_interval = 0.5
+
+# A death followed by a rejoin within this many seconds is a respawn, not a new connection.
+respawn_window = 600
+
+# Override Logs/ directory location if it's not alongside console_log.
+# logs_dir =
+
+# Path to the PZP Zomboid mod's kill-count file (Workshop ID 3793020885).
+# Linux example:   kills_file = /home/pzserver/Zomboid/Lua/pzp_player_kills.txt
+# Windows example: kills_file = C:\Users\YourName\Zomboid\Lua\pzp_player_kills.txt
+# kills_file =
+
+[steam]
+# Optional -- enriches join embeds with persona name, avatar, and (with
+# an api_key) PZ hours and "also played" games.
+enabled = true
+api_key = CHANGEME
+cache_hours = 24

@@ -1,0 +1,29 @@
+# pzpanel .gitignore
+
+# Live config -- contains RCON password, Discord webhook, Steam API key
+pzpanel.ini
+
+# Runtime state files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.json
+!pzpanel.ini.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Backups created by config/realm ini editor
+backups/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

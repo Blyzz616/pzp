@@ -1,0 +1,17 @@
+[Unit]
+Description=Project Zomboid Dedicated Server (realm)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pzserver
+WorkingDirectory=/home/pzserver/pzserver
+ExecStart=/home/pzserver/pzserver/start-server_realm.sh
+ExecStop=/usr/bin/python3 /opt/pzp/graceful_stop.py
+Restart=on-success
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
