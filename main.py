@@ -13,7 +13,7 @@ directory alongside main.py on Windows. Override with PZPANEL_CONFIG
 environment variable.
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.2"
 
 import asyncio
 import configparser
@@ -52,15 +52,11 @@ log = logging.getLogger("pzpanel")
 
 app = FastAPI(title="PZ Panel")
 
-# CONFIG_PATH: same directory as this script on Windows (sits next to main.py),
-# /opt/pzp/pzpanel.ini on Linux. Can be overridden via PZPANEL_CONFIG env var.
 CONFIG_PATH = str(os.environ.get("PZPANEL_CONFIG") or pc.get_default_config_path())
 
 ALLOWED_ACTIONS = ("start", "stop", "restart")
 ACTION_TIMEOUTS = {"start": 20, "stop": 150, "restart": 150}
 
-# Favicon directory: next to this script if it exists there (dev/Windows layout),
-# otherwise in the OS data dir (Linux deployed layout).
 _SCRIPT_DIR = Path(__file__).parent
 _FAVICON_DIR = (_SCRIPT_DIR / "favicon" if (_SCRIPT_DIR / "favicon").exists()
                 else pc.get_default_data_dir() / "favicon")
@@ -204,9 +200,13 @@ code{font-family:'JetBrains Mono',monospace;background:#0d110a;padding:.1rem .35
 .lvl-log{color:var(--ink);font-weight:600}.lvl-warn{color:var(--amber);font-weight:700}.lvl-error{color:var(--rust);font-weight:700}
 .drag-handle{cursor:grab;color:var(--ink-dim);text-align:center;font-size:1.1rem;user-select:none;width:1.6rem}
 .drag-handle:active{cursor:grabbing}tr.dragging{opacity:.35}
-.cfg-section{margin-bottom:2rem;padding-bottom:1.5rem;border-bottom:1px solid var(--line)}
-.cfg-section:last-child{border-bottom:none}
-.cfg-section-title{font-family:'Oswald',sans-serif;font-size:1.1rem;letter-spacing:.04em;text-transform:uppercase;margin:0 0 1rem;color:var(--amber)}
+.cfg-section{margin-bottom:0;padding-bottom:0;border-bottom:1px solid var(--line)}
+.cfg-section:last-child{border-bottom:1px solid var(--line)}
+.cfg-section-title{font-family:'Oswald',sans-serif;font-size:1.1rem;letter-spacing:.04em;text-transform:uppercase;margin:0;color:var(--amber);padding:.9rem 0;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none}
+.cfg-section-title:hover{color:#ffc840}
+.cfg-section-title .cfg-chevron{font-size:.75rem;transition:transform .2s;display:inline-block}
+.cfg-section-title.collapsed .cfg-chevron{transform:rotate(-90deg)}
+.cfg-section-body{padding-bottom:1.25rem}
 .cfg-group{margin-bottom:1rem;display:flex;flex-direction:column;gap:.35rem}
 .cfg-label{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.05em}
 .cfg-help{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--ink-dim);opacity:.7;line-height:1.5}
@@ -1501,11 +1501,11 @@ def console_page():
             function colorizeLine(line){{var escaped=escapeHtml(line);var m=line.match(/^(ERROR|WARN|LOG)/);if(!m)return escaped;var level=m[1];var cls=level==='ERROR'?'lvl-error':level==='WARN'?'lvl-warn':'lvl-log';var idx=escaped.indexOf(level);if(idx===-1)return escaped;return escaped.slice(0,idx)+'<span class="'+cls+'">'+level+'</span>'+escaped.slice(idx+level.length);}}
             function appendLine(line){{var div=document.createElement('div');div.innerHTML=colorizeLine(line);output.appendChild(div);while(output.childElementCount>MAX_LINES){{output.removeChild(output.firstChild);}}if(atBottom)output.scrollTop=output.scrollHeight;}}
             var source=new EventSource('/console/stream');
-            source.onmessage=function(e){{buffer.push(e.data);if(buffer.length>MAX_LINES)buffer.shift();if(paused)return;var filter=filterEl.value.toLowerCase();if(!filter||e.data.toLowerCase().indexOf(filter)!==-1){{appendLine(e.data);}}}};
-            source.onerror=function(){{statusEl.textContent='\u25CF DISCONNECTED';statusEl.style.color='var(--rust)';;}};
-            window.renderConsole=function(){{var filter=filterEl.value.toLowerCase();var lines=filter?buffer.filter(function(l){{return l.toLowerCase().indexOf(filter)!==-1;}}):buffer;output.innerHTML='';var frag=document.createDocumentFragment();lines.forEach(function(l){{var div=document.createElement('div');div.innerHTML=colorizeLine(l);frag.appendChild(div);}});output.appendChild(frag);if(atBottom)output.scrollTop=output.scrollHeight;}};
-            window.toggleConsolePause=function(){{paused=!paused;pauseBtn.textContent=paused?'Resume':'Pause';if(!paused){{statusEl.textContent='\u25CF STREAMING';statusEl.style.color='var(--signal)';renderConsole();}}else{{statusEl.textContent='\u25CF PAUSED';statusEl.style.color='var(--amber)';}}}};
-            window.clearConsole=function(){{buffer=[];renderConsole();}};
+            source.onmessage=function(e){{buffer.push(e.data);if(buffer.length>MAX_LINES)buffer.shift();if(paused)return;var filter=filterEl.value.toLowerCase();if(!filter||e.data.toLowerCase().indexOf(filter)!==-1){{appendLine(e.data);}}}}
+            source.onerror=function(){{statusEl.textContent='\u25CF DISCONNECTED';statusEl.style.color='var(--rust)';}}
+            window.renderConsole=function(){{var filter=filterEl.value.toLowerCase();var lines=filter?buffer.filter(function(l){{return l.toLowerCase().indexOf(filter)!==-1;}}):buffer;output.innerHTML='';var frag=document.createDocumentFragment();lines.forEach(function(l){{var div=document.createElement('div');div.innerHTML=colorizeLine(l);frag.appendChild(div);}});output.appendChild(frag);if(atBottom)output.scrollTop=output.scrollHeight;}}
+            window.toggleConsolePause=function(){{paused=!paused;pauseBtn.textContent=paused?'Resume':'Pause';if(!paused){{statusEl.textContent='\u25CF STREAMING';statusEl.style.color='var(--signal)';renderConsole();}}else{{statusEl.textContent='\u25CF PAUSED';statusEl.style.color='var(--amber)';}}}}
+            window.clearConsole=function(){{buffer=[];renderConsole();}}
         }})();
         </script>
     """
@@ -1618,8 +1618,8 @@ def settings_page(request: Request):
             function markDirty(){{saveBtn.disabled=false;}}
             form.addEventListener('input',markDirty);form.addEventListener('change',markDirty);
         }})();
-        function pzpFindFile(fieldName,searchType){{fetch('/settings/find-file?type='+encodeURIComponent(searchType)).then(function(r){{return r.json();}}).then(function(data){{var box=document.getElementById(fieldName+'-find-results');box.innerHTML='';if(!data.candidates||data.candidates.length===0){{box.innerHTML='<p class="note" style="border-top:none;margin-top:0;padding-top:0;">No matches found nearby.</p>';box.style.display='block';return;}}data.candidates.forEach(function(path){{var btn=document.createElement('button');btn.type='button';btn.className='link-add';btn.style.display='block';btn.style.marginTop='.3rem';btn.textContent=path;btn.onclick=function(){{var input=document.querySelector('input[name="'+fieldName+'"]');input.value=path;input.dispatchEvent(new Event('input',{{bubbles:true}}));box.style.display='none';;}};box.appendChild(btn);}});box.style.display='block';}}).catch(function(err){{console.error('find-file failed',err);}});}}
-        function pzpIniParts(iniPath){{var parts=iniPath.split('/').filter(function(p){{return p.length>0;}});if(parts.length===0)return null;var filename=parts.pop();var stem=filename.replace(/\.ini$/i,'');return {{dirParts:parts,stem:stem}};}}
+        function pzpFindFile(fieldName,searchType){{fetch('/settings/find-file?type='+encodeURIComponent(searchType)).then(function(r){{return r.json();}}).then(function(data){{var box=document.getElementById(fieldName+'-find-results');box.innerHTML='';if(!data.candidates||data.candidates.length===0){{box.innerHTML='<p class="note" style="border-top:none;margin-top:0;padding-top:0;">No matches found nearby.</p>';box.style.display='block';return;}}data.candidates.forEach(function(path){{var btn=document.createElement('button');btn.type='button';btn.className='link-add';btn.style.display='block';btn.style.marginTop='.3rem';btn.textContent=path;btn.onclick=function(){{var input=document.querySelector('input[name="'+fieldName+'"]');input.value=path;input.dispatchEvent(new Event('input',{{bubbles:true}}));box.style.display='none';}};box.appendChild(btn);}});box.style.display='block';}}).catch(function(err){{console.error('find-file failed',err);}});}}
+        function pzpIniParts(iniPath){{var parts=iniPath.split('/').filter(function(p){{return p.length>0;}});if(parts.length===0)return null;var filename=parts.pop();var stem=filename.replace(/[.]ini$/i,'');return {{dirParts:parts,stem:stem}};}}
         function pzpDeriveConsoleLog(fieldName){{var iniInput=document.querySelector('input[name="paths__server_ini"]');var parsed=pzpIniParts(iniInput.value||'');if(!parsed||parsed.dirParts.length<1){{alert('Fill in the World Config (.ini) Path above first.');return;}}var upTwo=parsed.dirParts.slice(0,-1);var target='/'+upTwo.concat(['server-console.txt']).join('/');var input=document.querySelector('input[name="'+fieldName+'"]');input.value=target;input.dispatchEvent(new Event('input',{{bubbles:true}}));}}
         function pzpDeriveSaveDir(fieldName){{var iniInput=document.querySelector('input[name="paths__server_ini"]');var parsed=pzpIniParts(iniInput.value||'');if(!parsed||parsed.dirParts.length<1){{alert('Fill in the World Config (.ini) Path above first.');return;}}var upTwo=parsed.dirParts.slice(0,-1);var target='/'+upTwo.concat(['Saves','Multiplayer',parsed.stem]).join('/');var input=document.querySelector('input[name="'+fieldName+'"]');input.value=target;input.dispatchEvent(new Event('input',{{bubbles:true}}));}}
         </script>
@@ -1876,6 +1876,7 @@ def config_page(request: Request):
             if "master_for" in f:
                 masters[f["master_for"]] = f["key"]
     sections_html = ""
+    first_section = True
     for grp in _REALM_GROUPS:
         fields_html = ""
         for f in grp["fields"]:
@@ -1887,12 +1888,14 @@ def config_page(request: Request):
             group_key = f.get("group_key")
             is_master = "master_for" in f
             field_id = f"cfg_{key}"
-            wrapper_extra = ""
             if group_key:
                 master_key = masters.get(group_key, "")
                 master_raw = ini.get(master_key, "false")
-                if not _bool_val(master_raw):
-                    wrapper_extra = ' class="cfg-disabled"'
+                disabled_cls = "" if _bool_val(master_raw) else " cfg-disabled"
+                wrapper_extra = (f' class="cfg-group{disabled_cls}"'
+                                 f' data-group-key="{html.escape(group_key)}"')
+            else:
+                wrapper_extra = ' class="cfg-group"'
             if f["type"] == "toggle":
                 checked = _bool_val(raw, inverted)
                 control = f"""
@@ -1954,25 +1957,28 @@ def config_page(request: Request):
                 control = f"""<input type="text" id="{field_id}" name="{field_id}" class="input"
                     value="{html.escape(raw)}" oninput="cfgDirty(this)">"""
             fields_html += f"""
-                <div class="cfg-group"{wrapper_extra} id="{field_id}_wrap">
+                <div{wrapper_extra} id="{field_id}_wrap">
                     <div class="cfg-label">{label}</div>
                     {control}
                     {('<div class="cfg-help">' + help_text + '</div>') if help_text else ''}
                 </div>
             """
+        collapsed_cls = "" if first_section else " collapsed"
+        collapsed_style = "" if first_section else "display:none;"
         sections_html += f"""
             <div class="cfg-section">
-                <p class="cfg-section-title">{html.escape(grp['group'])}</p>
-                {fields_html}
+                <p class="cfg-section-title{collapsed_cls}" onclick="cfgToggleSection(this)">{html.escape(grp['group'])}<span class="cfg-chevron">&#9660;</span></p>
+                <div class="cfg-section-body" style="{collapsed_style}">{fields_html}</div>
             </div>
         """
+        first_section = False
     body = f"""
         {banner_html}
         <form method="post" action="/config" id="cfg-form">
             {sections_html}
         </form>
         <div class="cfg-save-bar" id="cfg-save-bar">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--ink-dim);">Unsaved changes</span>
+            <button type="button" class="btn" onclick="location.reload()">Discard</button>
             <button type="button" class="btn primary" onclick="cfgSaveClick()">Save</button>
         </div>
         <div id="cfg-restart-modal" class="modal-backdrop" onclick="if(event.target===this) cfgCloseModal()">
@@ -1989,9 +1995,31 @@ def config_page(request: Request):
         </div>
         <script>
         var cfgDirtyFlag=false;
-        function cfgDirty(el){{cfgDirtyFlag=true;document.getElementById('cfg-save-bar').classList.add('visible');if(el.type==='checkbox'&&el.closest('.toggle-wrap')){{var lbl=document.getElementById(el.id+'_label');if(lbl)lbl.textContent=el.checked?'ON':'OFF';}}var masterFor=el.dataset.masterFor;if(masterFor){{var isOn=el.checked;document.querySelectorAll('[data-group-key="'+masterFor+'"]').forEach(function(wrap){{wrap.classList.toggle('cfg-disabled',!isOn);}});}}}}
+        function cfgApplyMaster(masterFor,isOn){{
+            document.querySelectorAll('[data-group-key="'+masterFor+'"]').forEach(function(wrap){{
+                wrap.classList.toggle('cfg-disabled',!isOn);
+                if(!isOn){{
+                    var childCb=wrap.querySelector('input[type="checkbox"][data-master-for]');
+                    if(childCb){{cfgApplyMaster(childCb.dataset.masterFor,false);}}
+                }}else{{
+                    var childCb=wrap.querySelector('input[type="checkbox"][data-master-for]');
+                    if(childCb){{cfgApplyMaster(childCb.dataset.masterFor,childCb.checked);}}
+                }}
+            }});
+        }}
+        function cfgDirty(el){{
+            cfgDirtyFlag=true;
+            document.getElementById('cfg-save-bar').classList.add('visible');
+            if(el.type==='checkbox'&&el.closest('.toggle-wrap')){{
+                var lbl=document.getElementById(el.id+'_label');
+                if(lbl)lbl.textContent=el.checked?'ON':'OFF';
+            }}
+            var masterFor=el.dataset.masterFor;
+            if(masterFor){{cfgApplyMaster(masterFor,el.checked);}}
+        }}
         function cfgRangeUpdate(el){{var num=document.getElementById(el.id+'_num');if(num)num.value=el.value;}}
         function cfgNumUpdate(el){{var rangeId=el.id.replace('_num','');var range=document.getElementById(rangeId);if(range){{var v=Math.max(parseInt(range.min),Math.min(parseInt(range.max),parseInt(el.value)||0));range.value=v;el.value=v;}}}}
+        function cfgToggleSection(titleEl){{var body=titleEl.nextElementSibling;var collapsed=titleEl.classList.toggle('collapsed');body.style.display=collapsed?'none':'';}}
         function cfgSaveClick(){{document.getElementById('cfg-restart-modal').classList.add('open');}}
         function cfgCloseModal(){{document.getElementById('cfg-restart-modal').classList.remove('open');}}
         function cfgSubmit(){{cfgCloseModal();document.getElementById('cfg-form').submit();}}

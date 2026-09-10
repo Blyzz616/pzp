@@ -6,7 +6,7 @@ needs no API key for public Workshop items. Returns title + time_updated
 (unix epoch) per mod ID so callers can diff against a last-known state.
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 import json
 import urllib.parse

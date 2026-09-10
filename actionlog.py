@@ -8,7 +8,7 @@ Only captures actions initiated through this codebase -- a raw
 since the initiator is what actually knows *why* the action happened.
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 import json
 from datetime import datetime, timezone

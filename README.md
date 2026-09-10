@@ -1,4 +1,4 @@
-# PZ Panel &nbsp;·&nbsp; v4.0.1
+# PZ Panel &nbsp;·&nbsp; v4.1.0
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
 
@@ -339,6 +339,6 @@ There is currently no built-in authentication — it is recommended to restrict 
 
 ## Version
 
-**v4.0.1** — port unified to 8080, server name derived from world `.ini` file
+**v4.1.0** — config page cascading grey-out, Discard button, SyntaxWarning fix
 
 See `CHANGELOG.md` for full history.

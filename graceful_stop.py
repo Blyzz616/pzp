@@ -17,7 +17,7 @@ the panel process for both sc and process modes. If this script is
 somehow invoked on Windows it exits 0 immediately.
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 import configparser
 import os

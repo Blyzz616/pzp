@@ -6,7 +6,7 @@ pattern as the other small state files in this project (automation.py,
 countdown_control.py).
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 import json
 import os

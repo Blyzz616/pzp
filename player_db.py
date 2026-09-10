@@ -21,7 +21,7 @@ the rest of pzpanel's runtime state). Path is configurable via
 [player_events] player_db in pzpanel.ini.
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 import logging
 import sqlite3

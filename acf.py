@@ -8,7 +8,7 @@ comments -- neither appears in appworkshop_*.acf output, so this is
 intentionally not a general-purpose VDF parser.
 """
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 import re
 
