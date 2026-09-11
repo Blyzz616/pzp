@@ -13,7 +13,7 @@ directory alongside main.py on Windows. Override with PZPANEL_CONFIG
 environment variable.
 """
 
-__version__ = "4.1.2"
+__version__ = "4.1.3"
 
 import asyncio
 import configparser
@@ -138,8 +138,6 @@ nav.tabs a.icon-tab svg { display:block; }
 .led { width:13px; height:13px; border-radius:50%; flex-shrink:0; background:var(--led-colour,var(--ink-dim)); box-shadow:0 0 10px 2px var(--led-colour,transparent); }
 .led.pulse { animation:ledpulse 1.7s ease-in-out infinite; }
 @keyframes ledpulse { 0%{opacity:1}8%{opacity:.4}10%{opacity:1}30%{opacity:.85}33%{opacity:1}55%{opacity:.3}60%{opacity:1}80%{opacity:.92}100%{opacity:1} }
-@keyframes led-dark-flash { 0%,100%{opacity:inherit}1%{opacity:0}66%{opacity:0}67%{opacity:inherit} }
-.led.dark-flash { animation:ledpulse 1.7s ease-in-out infinite,led-dark-flash 33ms linear 1; }
 @media(prefers-reduced-motion:reduce){.led.pulse{animation:none}}
 .readout-label { font-family:'JetBrains Mono',monospace; font-size:1rem; letter-spacing:.1em; text-transform:uppercase; }
 .readout-sub { font-family:'JetBrains Mono',monospace; font-size:.72rem; color:var(--ink-dim); margin-left:auto; }
@@ -369,45 +367,89 @@ def _countdown_summary():
     return countdown, postponed
 
 
-SETTINGS_SCHEMA = [
-    {"section": "rcon", "key": "host", "label": "RCON Host", "type": "text"},
-    {"section": "rcon", "key": "port", "label": "RCON Port", "type": "number"},
-    {"section": "rcon", "key": "password", "label": "RCON Password", "type": "password", "sensitive": True},
-    {"section": "paths", "key": "server_ini", "label": "World Config (.ini) Path", "type": "text", "assist": "find-ini",
-     "help": "The current world's server .ini file. Can be named anything (e.g. servertest.ini, myworld.ini)."},
-    {"section": "paths", "key": "workshop_acf", "label": "Workshop ACF Path", "type": "text", "assist": "find-acf"},
-    {"section": "paths", "key": "console_log", "label": "Console Log Path", "type": "text", "assist": "derive-console-log"},
-    {"section": "paths", "key": "multiplayer_save_dir", "label": "Multiplayer Save Dir", "type": "text", "assist": "derive-save-dir",
-     "help": "Enables the Status page Danger Zone. Leave blank to disable."},
-    {"section": "discord", "key": "webhook_url", "label": "Discord Webhook URL", "type": "password", "sensitive": True,
-     "help": "Needs a panel restart to take effect."},
-    {"section": "server", "key": "name", "label": "Server Display Name (fallback)", "type": "text",
-     "help": "Used only if the World Config .ini path above is not set. Panel normally reads the name from PublicName in the server .ini."},
-    {"section": "server", "key": "unit", "label": "Systemd Unit / Service Name", "type": "text",
-     "help": "Linux: systemd unit (e.g. pzserver). Windows sc mode: Windows service name. Not used in process mode."},
-    {"section": "server", "key": "windows_mode", "label": "Windows Mode", "type": "text",
-     "help": "Windows only: 'sc' (Windows Service) or 'process' (bare process). Ignored on Linux."},
-    {"section": "server", "key": "windows_start_script", "label": "Windows Start Script", "type": "text",
-     "help": "Windows process mode only: path to the .bat or .exe used to launch the PZ server."},
-    {"section": "player_events", "key": "state_file", "label": "Player-Event State File", "type": "text",
-     "help": "Needs a panel restart to take effect."},
-    {"section": "player_events", "key": "player_db", "label": "Player DB Path", "type": "text",
-     "help": "SQLite DB for persistent player/kill tracking. Needs a panel restart to take effect."},
-    {"section": "player_events", "key": "poll_interval", "label": "Poll Interval (sec)", "type": "number",
-     "help": "Needs a panel restart to take effect."},
-    {"section": "player_events", "key": "respawn_window", "label": "Respawn Window (sec)", "type": "number",
-     "help": "Needs a panel restart to take effect."},
-    {"section": "player_events", "key": "logs_dir", "label": "Logs Dir Override", "type": "text",
-     "help": "Needs a panel restart to take effect."},
-    {"section": "player_events", "key": "kills_file", "label": "Kills File Path", "type": "text",
-     "help": "Needs a panel restart to take effect."},
-    {"section": "steam", "key": "enabled", "label": "Steam Enrichment Enabled", "type": "checkbox",
-     "help": "Needs a panel restart to take effect."},
-    {"section": "steam", "key": "api_key", "label": "Steam Web API Key", "type": "password", "sensitive": True,
-     "help": "Needs a panel restart to take effect."},
-    {"section": "steam", "key": "cache_hours", "label": "Steam Cache Hours", "type": "number",
-     "help": "Needs a panel restart to take effect."},
+SETTINGS_GROUPS = [
+    {
+        "group": "Connection",
+        "help": "Required — the panel cannot control your server without these.",
+        "collapsed": False,
+        "fields": [
+            {"section": "rcon", "key": "host", "label": "RCON Host", "type": "text"},
+            {"section": "rcon", "key": "port", "label": "RCON Port", "type": "number"},
+            {"section": "rcon", "key": "password", "label": "RCON Password", "type": "password", "sensitive": True},
+        ],
+    },
+    {
+        "group": "Paths",
+        "help": "Required — point these at your server files so the panel can read mods, status, and logs.",
+        "collapsed": False,
+        "fields": [
+            {"section": "paths", "key": "server_ini", "label": "World Config (.ini) Path", "type": "text", "assist": "find-ini",
+             "help": "Your world's server .ini file. Can be named anything (e.g. servertest.ini)."},
+            {"section": "paths", "key": "workshop_acf", "label": "Workshop ACF Path", "type": "text", "assist": "find-acf"},
+            {"section": "paths", "key": "console_log", "label": "Console Log Path", "type": "text", "assist": "derive-console-log"},
+            {"section": "paths", "key": "multiplayer_save_dir", "label": "Multiplayer Save Dir", "type": "text", "assist": "derive-save-dir",
+             "help": "Enables the Danger Zone (world wipe) on the Status page. Leave blank to hide it."},
+        ],
+    },
+    {
+        "group": "Server Control",
+        "help": "How the panel starts and stops your server. Linux uses systemd; Windows uses a service or a batch file.",
+        "collapsed": True,
+        "os_toggle": True,
+        "fields": [
+            {"section": "server", "key": "name", "label": "Display Name (fallback)", "type": "text",
+             "help": "Only used if no World Config .ini is set above. The panel normally reads the name from PublicName in the server .ini."},
+            {"section": "server", "key": "unit", "label": "Systemd Unit Name", "type": "text", "os": "linux",
+             "help": "The systemd unit that runs your PZ server (e.g. pzserver)."},
+            {"section": "server", "key": "unit", "label": "Windows Service Name", "type": "text", "os": "windows",
+             "help": "The Windows service name as registered with sc.exe or NSSM (sc mode only)."},
+            {"section": "server", "key": "windows_mode", "label": "Windows Mode", "type": "text", "os": "windows",
+             "help": "'sc' — Windows Service (recommended). 'process' — pzpanel launches the server itself."},
+            {"section": "server", "key": "windows_start_script", "label": "Windows Start Script", "type": "text", "os": "windows",
+             "help": "Process mode only: path to your server's .bat or .exe start file."},
+        ],
+    },
+    {
+        "group": "Discord Integration",
+        "help": "Optional — post join/leave/death embeds and mod-update announcements to a Discord channel. Needs a panel restart to take effect.",
+        "collapsed": True,
+        "fields": [
+            {"section": "discord", "key": "webhook_url", "label": "Webhook URL", "type": "password", "sensitive": True,
+             "help": "Create a webhook in Discord: Server Settings → Integrations → Webhooks."},
+        ],
+    },
+    {
+        "group": "Steam Enrichment",
+        "help": "Optional — adds Steam persona names, avatars, and PZ hours to join embeds. Needs a panel restart to take effect.",
+        "collapsed": True,
+        "fields": [
+            {"section": "steam", "key": "enabled", "label": "Enabled", "type": "checkbox"},
+            {"section": "steam", "key": "api_key", "label": "Steam Web API Key", "type": "password", "sensitive": True,
+             "help": "Free at steamcommunity.com/dev/apikey"},
+            {"section": "steam", "key": "cache_hours", "label": "Cache Hours", "type": "number"},
+        ],
+    },
+    {
+        "group": "Kill Tracking (PZP Mod)",
+        "help": "Optional — enables the Killboard page. Requires the PZP Lua mod (Workshop ID 3793020885) installed on your server. Needs a panel restart to take effect.",
+        "collapsed": True,
+        "fields": [
+            {"section": "player_events", "key": "kills_file", "label": "Kills File Path", "type": "text",
+             "help": "Path to pzp_player_kills.txt written by the PZP mod."},
+            {"section": "player_events", "key": "player_db", "label": "Player DB Path", "type": "text",
+             "help": "SQLite database for persistent player/kill tracking."},
+            {"section": "player_events", "key": "state_file", "label": "Player-Event State File", "type": "text"},
+            {"section": "player_events", "key": "poll_interval", "label": "Poll Interval (sec)", "type": "number"},
+            {"section": "player_events", "key": "respawn_window", "label": "Respawn Window (sec)", "type": "number",
+             "help": "A death followed by a rejoin within this many seconds counts as a respawn, not a new connection."},
+            {"section": "player_events", "key": "logs_dir", "label": "Logs Dir Override", "type": "text",
+             "help": "Override the Logs/ directory location if it's not alongside console_log."},
+        ],
+    },
 ]
+
+# Flat list for save handler
+SETTINGS_SCHEMA = [f for g in SETTINGS_GROUPS for f in g["fields"]]
 
 
 def _read_all_settings():
@@ -848,7 +890,6 @@ def status_page():
         document.addEventListener('keydown',function(e){{if(e.key==='Escape'){{closePostponeModal();closeCheckModsModal();}}}});
         function refreshStatus(){{fetch('/api/status-full').then(function(r){{return r.json();}}).then(function(data){{var ledColours={{online:'var(--signal)',starting:'var(--amber)',failed:'var(--rust)'}};var led=document.getElementById('status-led');var colour=ledColours[data.state]||'var(--ink-dim)';led.style.setProperty('--led-colour',colour);led.classList.toggle('pulse',!!ledColours[data.state]);document.getElementById('status-label').textContent=data.state.toUpperCase();document.getElementById('status-unit').textContent=data.unit+'.service';var isRunning=(data.state==='online'||data.state==='starting');document.getElementById('btn-start').className='btn'+(!isRunning?' primary':'');document.getElementById('btn-stop').className='btn'+(isRunning?' danger':'');document.getElementById('btn-restart').className='btn'+(data.state==='online'?' info':'');var wdForm=document.getElementById('watchdog-form');var wdBtn=document.getElementById('watchdog-btn');var wdTagParent=document.getElementById('watchdog-tag').parentNode;if(data.watchdog_paused){{wdTagParent.querySelector('#watchdog-tag').outerHTML='<span class="tag warn" id="watchdog-tag">Watchdog paused</span>';wdForm.action='/automation/resume';wdBtn.textContent='Resume Watchdog';wdBtn.className='btn primary';}}else{{wdTagParent.querySelector('#watchdog-tag').outerHTML='<span class="tag ok" id="watchdog-tag">Watchdog active</span>';wdForm.action='/automation/pause';wdBtn.textContent='Pause Watchdog';wdBtn.className='btn danger';}}var cdBlock=document.getElementById('countdown-block');if(data.countdown){{cdBlock.style.display='';document.getElementById('countdown-label').textContent=data.countdown.paused?('Countdown paused at '+data.countdown.remaining_display):('Restarting in '+data.countdown.remaining_display);document.getElementById('countdown-mods').textContent=data.countdown.mods;document.getElementById('countdown-led').style.setProperty('--led-colour',data.countdown.paused?'var(--amber)':'var(--rust)');var pForm=document.getElementById('countdown-pause-form');var pBtn=document.getElementById('countdown-pause-btn');if(data.countdown.paused){{pForm.action='/countdown/resume';pBtn.textContent='Resume';pBtn.className='btn primary';}}else{{pForm.action='/countdown/pause';pBtn.textContent='Pause';pBtn.className='btn';}}var pausedDisplay=data.countdown.paused?'':'none';document.getElementById('countdown-cancel-form').style.display=pausedDisplay;document.getElementById('countdown-checkmods-btn').style.display=pausedDisplay;}}else{{cdBlock.style.display='none';}}var pdBlock=document.getElementById('postponed-block');if(data.postponed){{pdBlock.style.display='';document.getElementById('postponed-label').textContent='Restart scheduled for '+data.postponed.label;document.getElementById('postponed-mods').textContent=data.postponed.mods;}}else{{pdBlock.style.display='none';}}}}).catch(function(err){{console.error('status refresh failed',err);}});}}
         setInterval(refreshStatus,3000);
-        (function scheduleLedFlicker(){{var led=document.getElementById('status-led');if(!led)return;function doFlash(cb){{led.classList.remove('dark-flash');void led.offsetWidth;led.classList.add('dark-flash');led.addEventListener('animationend',function onEnd(e){{if(e.animationName!=='led-dark-flash')return;led.removeEventListener('animationend',onEnd);led.classList.remove('dark-flash');if(cb)cb();}},{{once:false}});}}function scheduleNext(){{var gap=5000+Math.random()*9000;setTimeout(function(){{if(!led.classList.contains('pulse')){{scheduleNext();return;}};var isDouble=Math.random()<0.6;if(isDouble){{doFlash(function(){{setTimeout(function(){{if(led.classList.contains('pulse'))doFlash(null);scheduleNext();}},300+Math.random()*300);}});}}else{{doFlash(null);scheduleNext();}}}},gap);}}scheduleNext();}})();
         </script>"""
     return page_shell("PZ Panel", "status", body)
 
@@ -1375,7 +1416,15 @@ def killboard_page():
     if db is not None:
         accounts = db.get_killboard()
         if not accounts:
-            table_html = '<p class="note">No player data yet -- waiting for the first connection to be recorded.</p>'
+            table_html = """<div style="display:flex;align-items:flex-start;gap:1.25rem;margin-bottom:1rem;">
+                <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885" target="_blank" rel="noopener noreferrer" style="flex-shrink:0;">
+                    <img src="https://steamuserimages-a.akamaihd.net/ugc/placeholder/3793020885/" width="72" height="72"
+                         style="border-radius:2px;border:1px solid var(--line);display:block;background:#1a2016;"
+                         onerror="this.src='https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/108600/header.jpg';this.style.height='auto';" alt="PZP mod">
+                </a>
+                <p class="note" style="border-top:none;margin-top:0;padding-top:0;">No player data yet \u2014 waiting for the first connection to be recorded.<br>
+                Make sure the <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885" class="link" target="_blank" rel="noopener noreferrer">PZP Lua mod (Workshop ID 3793020885)</a> is installed and <code>kills_file</code> is configured in Settings.</p>
+            </div>"""
         else:
             account_blocks = []
             for acc in accounts:
@@ -1548,15 +1597,14 @@ def settings_page(request: Request):
     msg_type = request.query_params.get("msg_type", "success")
     banner_html = f'<p class="banner {msg_type}">{html.escape(msg)}</p>' if msg else ""
     current = _read_all_settings()
-    sections_seen = []
-    rows_by_section = {}
-    for field in SETTINGS_SCHEMA:
+
+    def _field_html(field):
         sec = field["section"]
-        if sec not in rows_by_section:
-            rows_by_section[sec] = []
-            sections_seen.append(sec)
-        current_val = current.get(sec, {}).get(field["key"], "")
-        field_name = f"{sec}__{field['key']}"
+        key = field["key"]
+        current_val = current.get(sec, {}).get(key, "")
+        field_name = f"{sec}__{key}"
+        os_attr = f' data-os="{field["os"]}"' if field.get("os") else ""
+
         if field.get("sensitive"):
             is_set = bool(current_val) and current_val != "CHANGEME"
             placeholder = "Click to change" if is_set else "Not set"
@@ -1569,6 +1617,7 @@ def settings_page(request: Request):
             input_html = (f'<input type="text" name="{html.escape(field_name)}" class="input" '
                           f'value="{html.escape(current_val)}">'
                           )
+
         assist = field.get("assist")
         assist_html = ""
         if assist in ("find-ini", "find-acf"):
@@ -1585,10 +1634,11 @@ def settings_page(request: Request):
         elif assist == "derive-save-dir":
             assist_html = (f'<button type="button" class="btn" style="margin-top:.4rem;" '
                            f'onclick="pzpDeriveSaveDir(\'{field_name}\')">Derive from .ini</button>')
+
         help_html = (f'<p class="note" style="margin-top:.3rem;padding-top:0;border-top:none;">'
-                    f'{html.escape(field["help"])}</p>' if field.get("help") else "")
-        rows_by_section[sec].append(f"""
-            <div style="margin-bottom:1.1rem;">
+                     f'{html.escape(field["help"])}</p>' if field.get("help") else "")
+        return f"""
+            <div style="margin-bottom:1.1rem;"{os_attr}>
                 <label style="display:block;font-family:'JetBrains Mono',monospace;font-size:.75rem;
                     color:var(--ink-dim);margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.05em;">
                     {html.escape(field['label'])}
@@ -1597,13 +1647,36 @@ def settings_page(request: Request):
                 {assist_html}
                 {help_html}
             </div>
-        """)
-    sections_html = ""
-    for sec in sections_seen:
-        sections_html += f"""
-            <p class="eyebrow" style="margin-top:1.75rem;letter-spacing:.1em;">[{html.escape(sec)}]</p>
-            {"".join(rows_by_section[sec])}
         """
+
+    sections_html = ""
+    for grp in SETTINGS_GROUPS:
+        collapsed_cls = " collapsed" if grp.get("collapsed") else ""
+        collapsed_style = "display:none;" if grp.get("collapsed") else ""
+        grp_help = (f'<p class="cfg-help" style="margin-bottom:.75rem;">{html.escape(grp["help"])}</p>'
+                    if grp.get("help") else "")
+
+        os_toggle_html = ""
+        if grp.get("os_toggle"):
+            os_toggle_html = """
+                <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.05em;">Platform:</span>
+                    <button type="button" class="btn" id="os-toggle-btn" onclick="settingsToggleOS(this)">Linux</button>
+                </div>
+            """
+
+        fields_html = "".join(_field_html(f) for f in grp["fields"])
+        sections_html += f"""
+            <div class="cfg-section">
+                <p class="cfg-section-title{collapsed_cls}" onclick="cfgToggleSection(this)">{html.escape(grp['group'])}<span class="cfg-chevron">&#9660;</span></p>
+                <div class="cfg-section-body" style="{collapsed_style}">
+                    {grp_help}
+                    {os_toggle_html}
+                    {fields_html}
+                </div>
+            </div>
+        """
+
     body = f"""
         {banner_html}
         <form method="post" action="/settings" id="settings-form">
@@ -1618,6 +1691,18 @@ def settings_page(request: Request):
             function markDirty(){{saveBtn.disabled=false;}}
             form.addEventListener('input',markDirty);form.addEventListener('change',markDirty);
         }})();
+        function cfgToggleSection(titleEl){{var body=titleEl.nextElementSibling;var collapsed=titleEl.classList.toggle('collapsed');body.style.display=collapsed?'none':'';}}
+        var pzpCurrentOS='linux';
+        function settingsToggleOS(btn){{
+            pzpCurrentOS=(pzpCurrentOS==='linux')?'windows':'linux';
+            btn.textContent=pzpCurrentOS==='linux'?'Linux':'Windows';
+            document.querySelectorAll('[data-os]').forEach(function(el){{
+                el.style.display=(el.dataset.os===pzpCurrentOS||!el.dataset.os)?'':'none';
+            }});
+        }}
+        document.querySelectorAll('[data-os]').forEach(function(el){{
+            el.style.display=el.dataset.os===pzpCurrentOS?'':'none';
+        }});
         function pzpFindFile(fieldName,searchType){{fetch('/settings/find-file?type='+encodeURIComponent(searchType)).then(function(r){{return r.json();}}).then(function(data){{var box=document.getElementById(fieldName+'-find-results');box.innerHTML='';if(!data.candidates||data.candidates.length===0){{box.innerHTML='<p class="note" style="border-top:none;margin-top:0;padding-top:0;">No matches found nearby.</p>';box.style.display='block';return;}}data.candidates.forEach(function(path){{var btn=document.createElement('button');btn.type='button';btn.className='link-add';btn.style.display='block';btn.style.marginTop='.3rem';btn.textContent=path;btn.onclick=function(){{var input=document.querySelector('input[name="'+fieldName+'"]');input.value=path;input.dispatchEvent(new Event('input',{{bubbles:true}}));box.style.display='none';}};box.appendChild(btn);}});box.style.display='block';}}).catch(function(err){{console.error('find-file failed',err);}});}}
         function pzpIniParts(iniPath){{var parts=iniPath.split('/').filter(function(p){{return p.length>0;}});if(parts.length===0)return null;var filename=parts.pop();var stem=filename.replace(/[.]ini$/i,'');return {{dirParts:parts,stem:stem}};}}
         function pzpDeriveConsoleLog(fieldName){{var iniInput=document.querySelector('input[name="paths__server_ini"]');var parsed=pzpIniParts(iniInput.value||'');if(!parsed||parsed.dirParts.length<1){{alert('Fill in the World Config (.ini) Path above first.');return;}}var upTwo=parsed.dirParts.slice(0,-1);var target='/'+upTwo.concat(['server-console.txt']).join('/');var input=document.querySelector('input[name="'+fieldName+'"]');input.value=target;input.dispatchEvent(new Event('input',{{bubbles:true}}));}}

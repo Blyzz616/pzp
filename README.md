@@ -1,344 +1,165 @@
-# PZ Panel &nbsp;·&nbsp; v4.1.0
+# PZ Panel &nbsp;·&nbsp; v4.1.3
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
+
+<table>
+<tr>
+<td><img src="pzp/screens/status.png" alt="Status"></td>
+<td><img src="pzp/screens/config.png" alt="Config"></td>
+<td><img src="pzp/screens/mods.png" alt="Mods"></td>
+</tr>
+<tr>
+<td><img src="pzp/screens/killboard.png" alt="Killboard"></td>
+<td><img src="pzp/screens/console.png" alt="Console"></td>
+<td><img src="pzp/screens/settings.png" alt="Settings"></td>
+</tr>
+</table>
 
 ## Features
 
 - **Status page** — start, stop, restart with live status indicator
-- **Config page** — edit your server's `.ini` settings from the browser (no more SSH for tweaks)
-- **Mod Manifest** — view installed mods, check for Workshop updates, add/remove/reorder mods
-- **Killboard** — per-player kill tracking, grouped by Steam account, backed by SQLite
-- **Console** — live tail of `server-console.txt` with filtering
-- **Discord integration** — join/leave/death embeds and mod-update restart announcements
-- **Mod-update auto-restart** — scheduled countdown with pause/postpone/cancel controls
-- **Action log** — audit trail of everything the panel has done
+- **Config page** — edit server `.ini` settings directly from the browser (collapsible sections, cascading PVP/chat/safehouse toggles)
+- **Mod Manifest** — see all Workshop mods, update status, drag-to-reorder, add/remove with optional live-server restart
+- **Killboard** — per-player kill tracking (current run + lifetime), backed by a companion PZ Lua mod
+- **Console** — live streaming log view with filter and pause
+- **Log** — action history for everything the panel touches
+- **Settings** — grouped, collapsible settings page with Linux/Windows platform toggle
 
 ---
 
 ## Requirements
 
-| | Linux | Windows |
-|---|---|---|
-| Python | 3.10+ | 3.10+ |
-| PZ server | Running under systemd | Running as a service or bare process |
-| SteamCMD | Installed alongside PZ server | Installed alongside PZ server |
+- Python 3.11+
+- A running Project Zomboid B42 dedicated server
+- RCON enabled on the server (`RCONPort` and `RCONPassword` set in your server `.ini`)
 
 ---
 
-## Linux Installation
-
-These instructions assume your PZ server runs as user `pzserver` under systemd, with server files under `/home/pzserver/`. Adjust paths to match your setup.
-
-### 1. Download pzpanel
+## Installation (Linux)
 
 ```bash
-cd /opt
-sudo git clone https://github.com/Blyzz616/pzp.git pzp
+# Clone into /opt/pzp
+sudo git clone https://github.com/Blyzz616/pzp.git /opt/pzp
 sudo chown -R pzserver:pzserver /opt/pzp
+
+# Create and activate a virtualenv
+sudo -u pzserver python3 -m venv /opt/pzp/venv
+sudo -u pzserver /opt/pzp/venv/bin/pip install fastapi uvicorn requests
+
+# Copy and edit config
+sudo -u pzserver cp /opt/pzp/pzpanel.ini.example /opt/pzp/pzpanel.ini
+# Edit /opt/pzp/pzpanel.ini — set [rcon] and [paths] at minimum
+
+# Install and start the systemd service
+sudo cp /opt/pzp/pzpanel.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pzpanel
 ```
 
-### 2. Install Python dependencies
+---
 
-```bash
-sudo -u pzserver bash
-cd /opt/pzp
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+## Installation (Windows)
 
-### 3. Configure pzpanel
+1. Clone or download the repo into a folder (e.g. `C:\pzp`)
+2. Install Python 3.11+ and run:
+   ```
+   pip install fastapi uvicorn requests
+   ```
+3. Copy `pzpanel.ini.example` → `pzpanel.ini` and fill in `[rcon]` and `[paths]`
+4. Run `pzpanel_windows.bat` to start the panel
 
-Copy the example config and edit it:
+---
 
-```bash
-cp /opt/pzp/pzpanel.ini.example /opt/pzp/pzpanel.ini
-nano /opt/pzp/pzpanel.ini
-```
+## Configuration
 
-At minimum, set these values:
+Open `pzpanel.ini` (or use the Settings page in the panel itself). Minimum required:
 
 ```ini
 [rcon]
-password = your_rcon_password_here
+host = 127.0.0.1
+port = 27015
+password = your_rcon_password
 
 [paths]
-; Your server .ini can be named anything -- servertest.ini is the PZ default.
-; Point this at whatever yours is called.
-server_ini    = /home/pzserver/Zomboid/Server/servertest.ini
-workshop_acf  = /home/pzserver/pzserver/steamapps/workshop/appworkshop_108600.acf
-console_log   = /home/pzserver/Zomboid/server-console.txt
-
-[server]
-unit = pzserver
+server_ini = /home/pzserver/Zomboid/Server/servertest.ini
+workshop_acf = /home/pzserver/.steam/steam/steamapps/workshop/appworkshop_108600.acf
+console_log = /home/pzserver/Zomboid/server-console.txt
 ```
 
-The panel reads its display name from `PublicName` in your server `.ini` automatically, so you don't need to set `[server] name` unless you want a fallback for when the ini isn't configured yet.
+Everything else is optional — the Settings page has descriptions for each field.
 
-Use the **Settings page** (cog icon) in the browser to configure optional features (Discord, Steam enrichment, kill tracking) after the panel is running. The **Find** and **Derive** buttons on the Settings page can locate your paths automatically if you're unsure.
+---
 
-### 4. Set up the systemd service
-
-Copy the included service file and enable it:
-
-```bash
-sudo cp /opt/pzp/pzpanel.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable pzpanel
-sudo systemctl start pzpanel
-```
-
-The panel will be available at **http://your-server-ip:8080**.
-
-### 5. (Optional) Set up graceful server stop
-
-The included `pzserver.service` uses `graceful_stop.py` as its `ExecStop` handler, which sends an RCON `quit` command (saving the world) before systemd kills the process. To use it:
-
-```bash
-sudo cp /opt/pzp/pzserver.service /etc/systemd/system/
-sudo systemctl daemon-reload
-```
-
-Edit `/etc/systemd/system/pzserver.service` to match your PZ server's actual install path and user before enabling it.
-
-### 6. (Optional) Set up mod-update auto-checker
-
-The mod checker runs on a timer and restarts the server when Workshop updates are available, with a countdown warning to online players.
-
-```bash
-sudo cp /opt/pzp/pzmodcheck.service /etc/systemd/system/
-sudo cp /opt/pzp/pzmodcheck.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now pzmodcheck.timer
-```
-
-### Updating pzpanel (Linux)
+## Updating
 
 ```bash
 cd /opt/pzp
 sudo -u pzserver git pull
-sudo -u pzserver bash -c "source venv/bin/activate && pip install -r requirements.txt"
 sudo chown -R pzserver:pzserver /opt/pzp/*
 sudo systemctl restart pzpanel
 ```
 
 ---
 
-## Windows Installation
+## Kill Tracking (PZP Mod)
 
-### 1. Install Python
+The Killboard page requires the companion Lua mod installed on your server:
 
-Download and install Python 3.10 or newer from [python.org](https://www.python.org/downloads/).
+**Workshop ID:** [3793020885](https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885)  
+**Mod ID:** `pzp`
 
-> **Important:** On the installer's first screen, tick **"Add Python to PATH"** before clicking Install.
-
-### 2. Download pzpanel
-
-Either clone with Git:
-
-```
-git clone https://github.com/Blyzz616/pzp.git pzpanel
-```
-
-Or download and extract the ZIP from GitHub (green **Code** button → **Download ZIP**).
-
-### 3. Run the launcher
-
-Double-click **`pzpanel_windows.bat`** inside the pzpanel folder.
-
-On first run it will:
-- Check your Python version
-- Create a virtual environment
-- Install all dependencies
-- Copy `pzpanel.ini.example` to `pzpanel.ini` and pause so you can edit it
-
-### 4. Configure pzpanel
-
-Open `pzpanel.ini` in any text editor (Notepad works). At minimum, set:
-
-```ini
-[rcon]
-password = your_rcon_password_here
-
-[paths]
-; Your server .ini can be named anything -- servertest.ini is the PZ default.
-; Point this at whatever yours is called.
-server_ini   = C:\Users\YourName\Zomboid\Server\servertest.ini
-workshop_acf = C:\steamcmd\steamapps\workshop\appworkshop_108600.acf
-console_log  = C:\Users\YourName\Zomboid\server-console.txt
-
-[server]
-; Choose one:
-windows_mode = sc       ; if your PZ server runs as a Windows service
-; windows_mode = process  ; if you launch PZ server from a batch file
-
-; process mode only -- path to your server's start script:
-; windows_start_script = C:\pzserver\StartServer64.bat
-```
-
-**Finding your paths:**
-- `server_ini` — look in `%USERPROFILE%\Zomboid\Server\` for a `.ini` file (usually `servertest.ini` unless you've renamed it)
-- `workshop_acf` — look in your SteamCMD folder under `steamapps\workshop\appworkshop_108600.acf`
-- `console_log` — look in `%USERPROFILE%\Zomboid\server-console.txt`
-
-After the panel is running, the **Settings page** (cog icon) has **Find** buttons that can locate these automatically.
-
-### 5. Choose a server control mode
-
-**`windows_mode = sc` (Windows Service — recommended for always-on servers)**
-
-Your PZ server must be registered as a Windows Service. The most common tool for this is [NSSM](https://nssm.cc/) (Non-Sucking Service Manager):
-
-```
-nssm install pzserver "C:\pzserver\StartServer64.bat"
-nssm start pzserver
-```
-
-Set `unit = pzserver` in `pzpanel.ini` to match whatever name you gave the service.
-
-**`windows_mode = process` (bare process — simpler, no service setup)**
-
-pzpanel will launch and track the server process itself. Set `windows_start_script` to the path of your server's `.bat` or `.exe` start file. No other setup needed.
-
-### 6. Start the panel
-
-Run `pzpanel_windows.bat` again (or keep the window from step 3 open). The panel will be available at **http://localhost:8080**.
-
-To access the panel from other devices on your network, use your PC's local IP address instead of `localhost`.
-
-### Running pzpanel at startup (Windows)
-
-To have pzpanel start automatically when Windows boots:
-
-1. Press `Win + R`, type `taskschd.msc`, press Enter
-2. Click **Create Basic Task**
-3. Name it `pzpanel`, click Next
-4. Trigger: **When the computer starts**, click Next
-5. Action: **Start a program**
-6. Program: browse to `pzpanel_windows.bat` in your pzpanel folder
-7. **Start in:** the pzpanel folder path (e.g. `C:\pzpanel`)
-8. Finish, then right-click the task → **Properties** → **Run whether user is logged on or not**
-
-### Updating pzpanel (Windows)
-
-If you cloned with Git:
-```
-cd pzpanel
-git pull
-pzpanel_windows.bat
-```
-
-If you downloaded the ZIP, re-download and extract, then copy your `pzpanel.ini` back in.
+Once installed, set `kills_file` in `pzpanel.ini` under `[player_events]` to point at the mod's output file (`pzp_player_kills.txt` in your server's Zomboid data directory), then restart the panel.
 
 ---
 
-## Kill Tracking (optional)
+## Discord Integration
 
-The Killboard page shows per-player kill counts grouped by Steam account. This requires the **PZP Lua mod** installed on your server.
-
-**Workshop ID: [3793020885](https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885)**
-
-Add it to your server via the Mod Manifest page, then set the kills file path in Settings:
-
-```ini
-[player_events]
-; Linux:
-kills_file = /home/pzserver/Zomboid/Lua/pzp_player_kills.txt
-; Windows:
-; kills_file = C:\Users\YourName\Zomboid\Lua\pzp_player_kills.txt
-```
-
-Restart the panel after adding this setting.
-
----
-
-## Discord Integration (optional)
-
-Create a webhook in your Discord server (**Server Settings → Integrations → Webhooks**) and paste the URL into Settings → Discord Webhook URL, or directly into `pzpanel.ini`:
+Create a webhook in your Discord server (Server Settings → Integrations → Webhooks) and paste the URL into `pzpanel.ini`:
 
 ```ini
 [discord]
 webhook_url = https://discord.com/api/webhooks/...
 ```
 
-Restart the panel for this to take effect. The panel will then post join/leave/death embeds and mod-update restart announcements to your Discord channel.
-
-For richer join embeds (Steam persona, avatar, hours played), also add a Steam Web API key — free at [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey):
-
-```ini
-[steam]
-api_key = your_steam_api_key_here
-```
+Restart the panel for it to take effect. The panel posts embeds on player join/leave/death and server up/down events.
 
 ---
 
 ## Accessing the panel remotely
 
-The panel binds to port **8080** by default. To access it from outside your local network:
-
-- Open port 8080 on your firewall/router (TCP)
-- Navigate to `http://your-server-ip:8080`
-
-There is currently no built-in authentication — it is recommended to restrict access via firewall rules or a reverse proxy (nginx/Caddy) if your server is publicly accessible.
+There is currently no built-in authentication - do not do this.
 
 ---
 
-## Troubleshooting
+## File layout
 
-**Panel won't start**
-- Check that `pzpanel.ini` exists and has valid RCON credentials
-- On Linux: `sudo journalctl -u pzpanel -n 50`
-- On Windows: run `pzpanel_windows.bat` from a Command Prompt to see error output
-
-**Server name shows as "PZ Server" instead of your world name**
-- Set `server_ini` in the Settings page to point at your world's `.ini` file
-- The panel reads `PublicName` from that file automatically — no need to set `[server] name` manually
-
-**"Could not check mods" error**
-- Verify `workshop_acf` points to the correct `appworkshop_108600.acf` file
-- Verify `server_ini` points to your world's `.ini` file (it can be named anything)
-- Use the **Find** buttons on the Settings page to locate them automatically
-
-**Server status shows STARTING but never goes ONLINE**
-- Check that your RCON port and password in `pzpanel.ini` match what's in your server's `.ini`
-- The server can take 2–5 minutes to fully load on first world generation
-
-**Kill tracking not updating**
-- Confirm the PZP Lua mod (Workshop ID `3793020885`) is installed and loaded
-- Confirm `kills_file` in `pzpanel.ini` points to the correct path
-- The mod updates its file roughly every 60 seconds — counts may lag by up to that long
-
-**Windows: server won't start in `sc` mode**
-- Open Services (`services.msc`) and confirm the service name matches `unit =` in `pzpanel.ini`
-- Check that the account running pzpanel has permission to control the service
-
-**Windows: server won't start in `process` mode**
-- Confirm `windows_start_script` points to a valid `.bat` or `.exe` file
-- Try running that script manually first to confirm it works on its own
-
----
-
-## File overview
-
-| File | Purpose |
-|---|---|
-| `main.py` | FastAPI web panel — all pages and API routes |
-| `platform_compat.py` | Cross-platform OS abstraction (start/stop/status) |
-| `discord_module.py` | Player event watcher + Discord embeds |
-| `player_db.py` | SQLite player/kill tracking database |
-| `mod_restart.py` | Mod-update auto-restart with countdown |
-| `modcheck.py` | Workshop update checker |
-| `graceful_stop.py` | Linux ExecStop wrapper (RCON quit before kill) |
-| `pzpanel.service` | systemd unit for pzpanel (Linux) |
-| `pzserver.service` | systemd unit for PZ server with graceful stop (Linux) |
-| `pzmodcheck.service/.timer` | systemd timer for mod-update checks (Linux) |
-| `pzpanel_windows.bat` | Windows launcher (setup + start) |
-| `pzpanel.ini.example` | Annotated config template |
+```
+/opt/pzp/
+├── main.py                  # FastAPI app — all pages and routes
+├── platform_compat.py       # OS abstraction (Linux/Windows)
+├── discord_module.py        # Player-event watcher + Discord embeds
+├── player_db.py             # SQLite kill/session tracking
+├── mod_restart.py           # Mod-update watchdog
+├── modcheck.py              # Workshop update checks
+├── steam_workshop.py        # Steam API lookups
+├── rcon.py                  # RCON client
+├── actionlog.py             # Panel action log
+├── countdown_control.py     # Restart countdown state
+├── automation.py            # Watchdog pause flag
+├── removed_mods.py          # Previously-removed mod list
+├── graceful_stop.py         # Graceful server stop helper
+├── acf.py                   # Steam ACF parser
+├── pzpanel.ini.example      # Config template
+├── pzpanel.service          # systemd unit
+├── pzpanel_windows.bat      # Windows launcher
+└── pzp/
+    └── screens/             # UI screenshots
+```
 
 ---
 
 ## Version
 
-**v4.1.0** — config page cascading grey-out, Discard button, SyntaxWarning fix
+**v4.1.3** — ghost death fix, grouped settings page with OS toggle, killboard mod image, screenshots
 
 See `CHANGELOG.md` for full history.

@@ -23,6 +23,8 @@ didn't run at all without a configured webhook.
 v3.0.0: added SQLite-backed persistent player tracking via player_db.py.
 v4.0.0: cross-platform -- CONFIG_PATH and state/DB paths now OS-aware
          via platform_compat.py. No Linux-specific paths hardcoded.
+v4.1.3: on_death now guards Discord post on steamid being known, so NPC
+         and engine-internal death lines don't trigger fake death embeds.
 
 IMPORTANT -- parser status (carried over from diZcord.py):
     Every pattern below except "denied" is VERIFIED against real B42.20
@@ -31,7 +33,7 @@ IMPORTANT -- parser status (carried over from diZcord.py):
     pzpanel.ini -- no code change needed.
 """
 
-__version__ = "4.1.0"
+__version__ = "4.1.3"
 
 import configparser
 import json
@@ -537,7 +539,6 @@ class Watcher:
                            description=desc)
 
     def _make_cfg(self):
-        """Reconstruct a minimal configparser for platform_compat calls."""
         import configparser as _cp
         cfg = _cp.ConfigParser()
         cfg.read_dict({"server": {
@@ -793,6 +794,10 @@ class Watcher:
 
         if self.discord is None:
             return
+        if not steamid:
+            # Name not in active logins -- likely an NPC or engine-internal entity.
+            # Do not post to Discord.
+            return
         fields = []
         if kills_this_run is not None:
             fields.append({"name": "Kills this run", "value": str(kills_this_run), "inline": True})
@@ -832,10 +837,6 @@ class Watcher:
 
 
 def build_watcher(config_path=None):
-    """
-    Reads the shared pzpanel.ini and returns a ready-to-run Watcher, or
-    None only if the config file itself can't be read at all.
-    """
     if config_path is None:
         config_path = os.environ.get("PZPANEL_CONFIG") or str(pc.get_default_config_path())
 
@@ -849,7 +850,7 @@ def build_watcher(config_path=None):
         log.info("No [discord] webhook_url configured -- tracking runs, Discord posting disabled")
         webhook_url = ""
 
-    server_name = ini.get("server", "name", fallback="Realm")
+    server_name = ini.get("server", "name", fallback="PZ Server")
     server_unit = ini.get("server", "unit", fallback="pzserver")
     console_log = ini.get("paths", "console_log", fallback="").strip()
     if not console_log:
