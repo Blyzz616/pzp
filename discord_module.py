@@ -1,39 +1,31 @@
 """
-Player-event tracking for PZP -- watches the PZ server's connection/
-user logs (join/leave/death/server up-down) and the PZP kill-count mod's
-output file, and surfaces both as: (1) live state main.py's /killboard
-page reads directly, and (2) optional Discord embeds.
+discord_module.py — Player-event watcher + Discord embed poster for pzpanel.
 
-This started as diZcord 2.2.0 (github.com/Blyzz616/diZcord-b42), ported
-into PZP as an optional module. The Discord/Steam/Tail/State classes and
-DEFAULT_PATTERNS below are kept byte-for-byte identical to diZcord
-2.2.0's logic where noted -- they're VERIFIED against real B42.20 logs
-and shouldn't be touched casually.
+Tails two log files:
+  1. server-console.txt  — server up/down, deaths (unchanged in B42)
+  2. Logs/*_connections.txt — join, disconnect, login-queue (B42 moved
+     these out of the console log into a structured connections file;
+     always the lexicographically highest *_connections.txt in the dir)
 
-As of this revision, tracking (sessions, kills, deaths) runs
-unconditionally -- it no longer requires a Discord webhook to be
-configured, since the killboard needs this data with or without
-Discord. Discord posting is now a separate, optional consumer: each
-on_* handler always updates self.state, and only calls self.discord.*
-if a webhook was actually configured (self.discord is None otherwise).
-This is the one real architectural change from the initial merge --
-prior to this, the whole Watcher (and therefore all tracking) simply
-didn't run at all without a configured webhook.
+Also polls the PZP kill-count mod's output file and surfaces everything as:
+  (1) live state for main.py's /killboard page and the SQLite player_db
+  (2) Discord embeds (optional)
 
-v3.0.0: added SQLite-backed persistent player tracking via player_db.py.
-v4.0.0: cross-platform -- CONFIG_PATH and state/DB paths now OS-aware
-         via platform_compat.py. No Linux-specific paths hardcoded.
-v4.1.3: on_death now guards Discord post on steamid being known, so NPC
-         and engine-internal death lines don't trigger fake death embeds.
+Kill/survival tracking runs unconditionally when the config block is present
+(even with no webhook configured), since the killboard needs this data with
+or without Discord.
 
-IMPORTANT -- parser status (carried over from diZcord.py):
-    Every pattern below except "denied" is VERIFIED against real B42.20
-    logs. "denied" still carries B41-era wording and is UNVERIFIED-B42.
-    Patterns can be overridden via an optional [patterns] section in
-    pzpanel.ini -- no code change needed.
+Milestone shout-outs:
+  Per-life:    1, 50, 100, 500, 1000, 5000, 10000
+               Fires when the kills file crosses the threshold on any poll.
+               Resets when the character dies (file drops back to 0).
+  Lifetime:    Same thresholds, then every 10k after (20k, 30k, ...)
+               Fires at most once per threshold per steamid, ever.
+               Tracked in persistent state.
+
+Kills file format (v4.2.3): JSON keyed by steamid.
+  {steamid: {username: {kills, alive, survived}, lifetimeKills: N}}
 """
-
-__version__ = "4.1.3"
 
 import configparser
 import json
@@ -41,341 +33,182 @@ import logging
 import os
 import random
 import re
-import subprocess
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import player_db as pdb
+import requests
+
 import platform_compat as pc
+import player_db as pdb
 
-log = logging.getLogger("pzpanel.discord_module")
+log = logging.getLogger("pzpanel.discord")
 
-# --------------------------------------------------------------------------
-# Discord embed colours (decimal), ported from diZcord's colours.dec
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Logs directory (B42 connections file lives here)
+# ---------------------------------------------------------------------------
+_LOGS_DIR = Path("/home/pzserver/Zomboid/Logs")
+
+
+def _find_connections_log():
+    """Return the lexicographically highest *_connections.txt in _LOGS_DIR."""
+    try:
+        candidates = sorted(_LOGS_DIR.glob("*_connections.txt"))
+        return candidates[-1] if candidates else None
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Log-line patterns
+# ---------------------------------------------------------------------------
+
+# Console log: server lifecycle + deaths only (B42 removed join/disconnect)
+_CONSOLE_PATTERNS_RAW = {
+    "server_up":   r"SERVER STARTED",
+    "server_down": r"Quit Java",
+    "death":       r"\buser (?P<name>\S+) died at \(",
+}
+
+# Connections log: structured key="value" lines
+_CONNECTIONS_PATTERNS_RAW = {
+    "login_queue": (
+        r'message="login-queue-request"'
+        r'.*?steam-id="(?P<steamid>\d+)"'
+    ),
+    "join": (
+        r'event="fully-connected"'
+        r'.*?steam-id="(?P<steamid>\d+)"'
+        r'.*?username="(?P<username>[^"]+)"'
+    ),
+    "disconnect": (
+        r'event="disconnect"'
+        r'.*?steam-id="(?P<steamid>\d+)"'
+        r'.*?username="(?P<username>[^"]+)"'
+    ),
+}
+
 COLOURS = {
-    "RED": 16711680,
-    "ORANGE": 16753920,
-    "LIME": 65280,
-    "PURPLE": 8388736,
-    "DARKVIOLET": 9699539,
-    "DISCORDBLUE": 45015,
-    "LAVENDER": 15132410,
-    "CHARTREUSE": 8388352,
+    "LIME":       0x00FF00,
+    "GREEN":      0x2ECC71,
+    "RED":        0xE74C3C,
+    "ORANGE":     0xE67E22,
+    "YELLOW":     0xF1C40F,
+    "BLUE":       0x3498DB,
+    "DARKVIOLET": 0x9B59B6,
+    "GREY":       0x95A5A6,
+    "GOLD":       0xFFD700,
 }
 
-# --------------------------------------------------------------------------
-# Default log patterns -- verified against real 42.20 logs (see diZcord
-# 2.2.0's CHANGELOG for verification history). Override any of these in
-# pzpanel.ini's [patterns] section.
-# --------------------------------------------------------------------------
-DEFAULT_PATTERNS = {
-    "connecting": r"message=\"client-connect\".*?steam-id=\"(?P<steamid>\d+)\".*?username=\"(?P<username>[^\"]*)\"",
-    "join": r"event=\"fully-connected\".*?ip=\"(?P<ip>[^\"]*)\".*?steam-id=\"(?P<steamid>\d+)\".*?username=\"(?P<username>[^\"]*)\"",
-    "disconnect": r"event=\"disconnect\".*?ip=\"(?P<ip>[^\"]*)\".*?steam-id=\"(?P<steamid>\d+)\".*?username=\"(?P<username>[^\"]*)\"",
-    "death": r"user (?P<name>.+?) died at \((?P<x>\d+),(?P<y>\d+),(?P<z>\d+)\)",
-    "server_up": r"SERVER STARTED",
-    "server_down": r"Server exited",
-    "denied": r"Client sent invalid server password",
-}
+# ---------------------------------------------------------------------------
+# Milestone thresholds
+# ---------------------------------------------------------------------------
+_LIFE_MILESTONES = [1, 50, 100, 500, 1000, 5000, 10000]
+_LIFETIME_BASE   = [1, 50, 100, 500, 1000, 5000, 10000]
+_LIFETIME_STEP   = 10000
 
-DEATH_MESSAGES = [
-    "**{name}** just died.",
-    "**{name}** has now made their contribution to the horde.",
-    "**{name}** swapped sides.",
-    "**{name}** has now completed their playthrough.",
-    "**{name}** used the wrong hole.",
-    "**{name}** kicked the bucket.",
-    "**{name}** decided to try something else (it did not work).",
-    "**{name}** forgot to pay their tribute to the R-N-Geezus.",
-    "**{name}** bought the farm.",
-    "**{name}** is still walking... breathing... not so much.",
-    "**{name}**'s survival story just hit a dead end.",
-    "**{name}**'s journey through the apocalypse has come to an abrupt halt.",
-    "RIP **{name}** — may your next respawn be more successful.",
-    "The zombies threw a party, and **{name}** was the main course.",
-    "**{name}** was measured. **{name}** was weighed. **{name}** was found wanting.",
-    "Looks like **{name}** just rolled a nat **1**.",
-    "Rest in pieces, **{name}**.",
-]
 
-RAGE_MESSAGES = [
-    "Looks like **{name}**'s exit was more dramatic than their survival skills.",
-    "Quitting is easy, surviving is hard. **{name}**, the zombies miss you.",
-    "**{name}** decided to take a break from survival.",
-    "Rage-quitting won't make the zombies go away, **{name}**. Come back and show them who's boss!",
-    "Surviving the apocalypse takes grit, **{name}**. Quitting only delays the inevitable. Ready for redemption?",
-    "Even the best stumble. **{name}**, the server needs your resilience. Rise from the ashes!",
-    "Zombies: 1, **{name}**: 0. Are you going to let them have the last laugh?",
-    "Nobody said surviving the apocalypse was easy. **{name}**, dust off those setbacks and rejoin the fight!",
-    "Rage-quitting won't erase the past, **{name}**. Redemption is just a login away.",
-    "The zombies might have won this round, but **{name}** isn't out for the count.",
-    "Apocalypse got you down, **{name}**? Rise from the ashes and show the zombies what you're made of!",
-    "Survival isn't for the faint-hearted. **{name}**, the server misses your resilience.",
-    "Shame! :bell: Shame! :bell: Shame! :bell:",
-]
+def _lifetime_milestones_up_to(n):
+    result = list(_LIFETIME_BASE)
+    nxt = _LIFETIME_BASE[-1] + _LIFETIME_STEP
+    while nxt <= n:
+        result.append(nxt)
+        nxt += _LIFETIME_STEP
+    return result
+
+
+def _milestone_message(threshold, name, tier):
+    if threshold == 1:
+        templates = [
+            "{name} draws first blood. The apocalypse just got personal.",
+            "Kill #1 for {name}. The horde has been warned.",
+            "{name} opens their account. Only several thousand to go.",
+        ]
+    elif tier == "life":
+        templates = [
+            "**{name}** just hit **{n:,}** kills this life. The zombies are running out of volunteers.",
+            "**{n:,}** kills this life for **{name}**. Truly a survivor.",
+            "**{name}** — **{n:,}** this run. The horde remembers.",
+        ]
+    else:
+        templates = [
+            "**{name}** crosses **{n:,}** lifetime kills. A monument to the fallen undead.",
+            "**{n:,}** lifetime kills for **{name}**. Legend.",
+            "**{name}** — **{n:,}** all-time. The apocalypse bows.",
+        ]
+    return random.choice(templates).format(name=name, n=threshold)
+
 
 RESPAWN_MESSAGES = [
-    "Well, well, well, if it isn't **{name}**. _Back_ from the dead.",
-    "Player **{name}** has rejoined the fight.",
-    "**{name}** decided to play for _Team Living_ once more.",
-    "If life knocks **{name}** down, they just get right back up.",
-    "There's no keeping **{name}** down for long.",
-    "When life hands **{name}** lemons, they do tequila shots.",
-    "**{name}** returns like a phoenix from the ashes of the apocalypse.",
-    "Undead beware, **{name}** is on a respawn rampage!",
-    "Zombies, meet your worst nightmare: **{name}**, resurrected and ready for more.",
-    "Death is just a pit-stop for **{name}** on the road of survival.",
-    "Did someone say zombie buffet? **{name}** is back for seconds.",
-    "New day, new character, same old **{name}** kicking zombie ass.",
-    "They tried to bury **{name}**. Little did they know, it's just a respawn point.",
-    "Back in the land of the living: **{name}**, the unstoppable survivor.",
+    "**{name}** is back — death is just a speed bump.",
+    "**{name}** spawned again. The zombies aren't done yet.",
+    "The undead couldn't keep **{name}** down.",
+    "**{name}** respawned. The apocalypse will have to try harder.",
+]
+RAGE_MESSAGES = [
+    "Looks like **{name}**'s exit was more dramatic than their survival skills.",
+    "**{name}** rage-quit. The zombies win this round.",
+    "**{name}** disconnected right after dying. Bold strategy.",
 ]
 
 
-def last_played_str(epoch):
-    if not epoch:
-        return None
-    d = date.fromtimestamp(epoch)
-    today = date.today()
-    if d == today:
-        return "Today"
-    if d == today - timedelta(days=1):
-        return "Yesterday"
-    return d.strftime("%d %b %Y")
-
-
-def human_duration(secs):
-    secs = max(0, int(secs))
+def human_duration(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
     parts = []
-    for unit, size in (("w", 604800), ("d", 86400), ("h", 3600), ("m", 60)):
-        if secs >= size:
-            parts.append(f"{secs // size}{unit}")
-            secs %= size
-    parts.append(f"{secs}s")
+    for unit, div in [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]:
+        v, seconds = divmod(seconds, div)
+        if v:
+            parts.append(f"{v}{unit}")
     return " ".join(parts)
 
 
-def _systemd_active_since(unit):
-    """Linux only -- returns unix epoch or None."""
-    try:
-        result = subprocess.run(
-            ["/usr/bin/systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", unit],
-            capture_output=True, text=True, timeout=5)
-        value = result.stdout.strip()
-    except Exception as err:
-        log.warning("Could not query systemd for %s start time: %s", unit, err)
+def _fmt_ingame_time(hours_survived):
+    if hours_survived is None:
         return None
-    if not value or value == "n/a":
-        return None
-    naive = value.rsplit(" ", 1)[0] if " " in value else value
-    try:
-        dt = datetime.strptime(naive, "%a %Y-%m-%d %H:%M:%S")
-        return time.mktime(dt.timetuple())
-    except ValueError:
-        return None
+    total_hours = int(hours_survived)
+    days = total_hours // 24
+    hrs  = total_hours % 24
+    if days and hrs:
+        return f"{days} day{'s' if days != 1 else ''}, {hrs} hour{'s' if hrs != 1 else ''}"
+    if days:
+        return f"{days} day{'s' if days != 1 else ''}"
+    return f"{hrs} hour{'s' if hrs != 1 else ''}"
 
 
-class Discord:
-    def __init__(self, webhook_url, dry_run=False):
-        self.url = webhook_url
-        self.dry_run = dry_run
+# ---------------------------------------------------------------------------
+# Discord webhook helper
+# ---------------------------------------------------------------------------
+class DiscordWebhook:
+    def __init__(self, url):
+        self.url = url
 
-    def embed(self, colour, title=None, description=None, thumbnail=None, fields=None):
-        e = {"color": colour}
+    def embed(self, colour, *, title=None, description=None, thumbnail=None,
+              fields=None, footer=None):
+        embed = {"color": colour}
         if title:
-            e["title"] = title
+            embed["title"] = title
         if description:
-            e["description"] = description
+            embed["description"] = description
         if thumbnail:
-            e["thumbnail"] = {"url": thumbnail}
+            embed["thumbnail"] = {"url": thumbnail}
         if fields:
-            e["fields"] = fields
-        return self._post({"embeds": [e]})
-
-    def content(self, text):
-        return self._post({"content": text})
-
-    def raw(self, payload):
-        return self._post(payload)
-
-    def _post(self, payload, attempt=0):
-        if self.dry_run:
-            log.info("[dry-run] would post: %s", json.dumps(payload))
-            return True
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            self.url, data=data,
-            headers={"Content-Type": "application/json",
-                     "User-Agent": f"pzpanel-discord/{__version__}"})
+            embed["fields"] = fields
+        if footer:
+            embed["footer"] = {"text": footer}
         try:
-            urllib.request.urlopen(req, timeout=15)
-            return True
-        except urllib.error.HTTPError as err:
-            if err.code == 429 and attempt < 3:
-                try:
-                    wait = float(json.loads(err.read()).get("retry_after", 2))
-                except Exception:
-                    wait = 2.0
-                log.warning("Discord rate limit, retrying in %.1fs", wait)
-                time.sleep(wait + 0.2)
-                return self._post(payload, attempt + 1)
-            elif err.code >= 500 and attempt < 3:
-                time.sleep(2 * (attempt + 1))
-                return self._post(payload, attempt + 1)
-            else:
-                try:
-                    detail = err.read().decode("utf-8", errors="replace")
-                except Exception:
-                    detail = "(could not read response body)"
-                log.error("Discord webhook failed (%s): %s -- %s", err.code, err.reason, detail)
-                return False
-        except Exception as err:
-            log.error("Discord webhook error: %s", err)
-            return False
+            r = requests.post(self.url, json={"embeds": [embed]}, timeout=8)
+            r.raise_for_status()
+        except Exception as e:
+            log.warning("Discord webhook failed: %s", e)
 
 
-class Steam:
-    PZ_APPID = 108600
-    API = "https://api.steampowered.com"
-
-    def __init__(self, cfg, state):
-        s = cfg.get("steam", {})
-        self.enabled = s.get("enabled", "true").strip().lower() != "false"
-        self.api_key = s.get("api_key", "").strip()
-        self.cache_secs = float(s.get("cache_hours", "24") or 24) * 3600
-        self.state = state
-
-    def profile(self, steamid):
-        if not self.enabled or not steamid:
-            return {}
-        cache = self.state.data.setdefault("steam_cache", {})
-        hit = cache.get(steamid)
-        have_key = bool(self.api_key)
-        if hit and time.time() - hit.get("at", 0) < self.cache_secs:
-            if not (have_key and not hit.get("via_api")):
-                return hit
-            log.info("Steam profile for %s: cached entry predates api_key, re-fetching", steamid)
-        info = {"at": time.time(), "via_api": have_key}
-        try:
-            if have_key:
-                self._fill_from_api(steamid, info)
-            else:
-                self._fill_from_xml(steamid, info)
-        except Exception as err:
-            log.warning("Steam lookup failed for %s: %s", steamid, err)
-            if hit:
-                return hit
-        cache[steamid] = info
-        self.state.save()
-        return info
-
-    def _fetch(self, url):
-        req = urllib.request.Request(
-            url, headers={"User-Agent": f"pzpanel-discord/{__version__}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.read()
-
-    def _fill_from_api(self, steamid, info):
-        q = urllib.parse.urlencode({"key": self.api_key, "steamids": steamid})
-        data = json.loads(self._fetch(f"{self.API}/ISteamUser/GetPlayerSummaries/v2/?{q}"))
-        players = data.get("response", {}).get("players", [])
-        if players:
-            info["persona"] = players[0].get("personaname")
-            info["avatar"] = players[0].get("avatarfull")
-        q = urllib.parse.urlencode({
-            "key": self.api_key, "steamid": steamid,
-            "include_appinfo": 1, "include_played_free_games": 1})
-        data = json.loads(self._fetch(f"{self.API}/IPlayerService/GetOwnedGames/v1/?{q}"))
-        others = []
-        for g in data.get("response", {}).get("games", []):
-            if g.get("appid") == self.PZ_APPID:
-                info["pz_hours"] = g.get("playtime_forever", 0) // 60
-            elif g.get("playtime_forever", 0) >= 60:
-                others.append(g)
-        others.sort(key=lambda g: g.get("rtime_last_played", 0), reverse=True)
-        info["games"] = [{"name": g.get("name", "?"),
-                          "hours": g.get("playtime_forever", 0) // 60,
-                          "last": g.get("rtime_last_played")}
-                         for g in others[:2]]
-
-    def _fill_from_xml(self, steamid, info):
-        xml = self._fetch(
-            f"https://steamcommunity.com/profiles/{steamid}?xml=1"
-        ).decode("utf-8", "replace")
-        m = re.search(r"<steamID><!\[CDATA\[(.*?)\]\]></steamID>", xml, re.S)
-        if m:
-            info["persona"] = m.group(1)
-        m = re.search(r"<avatarFull><!\[CDATA\[(.*?)\]\]></avatarFull>", xml, re.S)
-        if m:
-            info["avatar"] = m.group(1)
-
-
-class Tail:
-    def __init__(self, path_fn, from_start=False):
-        self.path_fn = path_fn
-        self.fh = None
-        self.path = None
-        self.sig = None
-        self.from_start = from_start
-        self.buf = ""
-
-    def _signature(self, path):
-        return pc.file_identity(path)
-
-    def _open(self, path, seek_end):
-        try:
-            self.fh = open(path, "r", encoding="utf-8", errors="replace")
-        except OSError:
-            self.fh = None
-            return
-        self.path = path
-        self.sig = self._signature(path)
-        self.buf = ""
-        if seek_end:
-            self.fh.seek(0, 2)
-
-    def poll(self):
-        target = self.path_fn()
-        if target is None:
-            return []
-        target = Path(target)
-
-        if self.fh is None:
-            self._open(target, seek_end=not self.from_start)
-            if self.fh is None:
-                return []
-        elif target != self.path or self._signature(target) != self.sig:
-            self.fh.close()
-            self._open(target, seek_end=False)
-            if self.fh is None:
-                return []
-        else:
-            try:
-                if target.stat().st_size < self.fh.tell():
-                    self.fh.seek(0)
-            except OSError:
-                pass
-
-        chunk = self.fh.read()
-        if not chunk:
-            return []
-        self.buf += chunk
-        lines = self.buf.split("\n")
-        self.buf = lines.pop()
-        return [ln.rstrip("\r") for ln in lines if ln.strip()]
-
-    def close(self):
-        if self.fh:
-            self.fh.close()
-            self.fh = None
-
-
+# ---------------------------------------------------------------------------
+# Kills file reader
+# Format (v4.2.3): JSON keyed by steamid.
+# {steamid: {username: {kills, alive, survived}, lifetimeKills: N}}
+# ---------------------------------------------------------------------------
 class KillsFile:
     def __init__(self, path):
         self.path = path
@@ -389,89 +222,310 @@ class KillsFile:
         if not force and self._mtime is not None and st.st_mtime == self._mtime:
             return None
         self._mtime = st.st_mtime
-        result = {}
         try:
-            text = self.path.read_text(encoding="utf-8", errors="replace")
+            text = self.path.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             return None
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or "|" not in line:
+        if not text:
+            return None
+        try:
+            raw = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            log.warning("Kills file is not valid JSON, skipping")
+            return None
+        # Returns {steamid: {characters: {username: {kills, alive, survived}}, lifetimeKills: N}}
+        result = {}
+        for steamid, entry in raw.items():
+            if not isinstance(entry, dict):
                 continue
-            username, _, kills_str = line.rpartition("|")
-            try:
-                result[username] = int(kills_str)
-            except ValueError:
-                log.warning("Unparseable line in kills file, skipping: %r", raw_line)
+            lifetime = entry.get("lifetimeKills", 0)
+            characters = {}
+            for key, val in entry.items():
+                if key == "lifetimeKills" or not isinstance(val, dict):
+                    continue
+                characters[key] = {
+                    "kills": int(val.get("kills", 0)),
+                    "alive": bool(val.get("alive", False)),
+                    "survived": float(val.get("survived", 0.0)),
+                }
+            result[steamid] = {
+                "characters": characters,
+                "lifetimeKills": int(lifetime),
+            }
         return result
 
 
+# ---------------------------------------------------------------------------
+# Persistent state
+# ---------------------------------------------------------------------------
 class State:
     def __init__(self, path):
         self.path = path
         self.data = {
-            "server_up_since": None,
-            "watcher_started": None,
             "sessions": {},
-            "pending": {},
             "totals": {},
             "players": {},
             "logins": {},
             "dead": {},
+            "pending": {},
+            "server_up_since": None,
             "kills_current_run": {},
-            "kills_lifetime": {},
+            "hours_current_run": {},
+            "kills_lifetime_by_steamid": {},
             "kills_last_updated": None,
             "session_kills": {},
-            "kills_accounted_mtime": {},
-            "session_kills_start": {},
+            "milestones_life_fired": {},
+            "milestones_lifetime_fired": {},
         }
-        if path.exists():
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self):
+        if self.path and Path(self.path).exists():
             try:
-                self.data.update(json.loads(path.read_text(encoding="utf-8")))
-            except Exception as err:
-                log.warning("Could not read player-event state file (%s), starting fresh", err)
+                with open(self.path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                for k, v in loaded.get("milestones_life_fired", {}).items():
+                    loaded["milestones_life_fired"][k] = set(v)
+                for k, v in loaded.get("milestones_lifetime_fired", {}).items():
+                    loaded["milestones_lifetime_fired"][k] = set(v)
+                self.data.update(loaded)
+            except Exception as e:
+                log.warning("Could not load state from %s: %s", self.path, e)
 
     def save(self):
+        if not self.path:
+            return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
-            tmp.replace(self.path)
-        except OSError as err:
-            log.error("Could not save player-event state: %s", err)
+            with self._lock:
+                data_copy = dict(self.data)
+                data_copy["milestones_life_fired"] = {
+                    k: list(v) for k, v in self.data["milestones_life_fired"].items()
+                }
+                data_copy["milestones_lifetime_fired"] = {
+                    k: list(v) for k, v in self.data["milestones_lifetime_fired"].items()
+                }
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data_copy, f, indent=2)
+                os.replace(tmp, self.path)
+        except Exception as e:
+            log.warning("Could not save state to %s: %s", self.path, e)
 
 
-class Watcher:
-    def __init__(self, cfg, discord, state, db=None):
-        self.cfg = cfg
-        self.discord = discord
-        self.state = state
+# ---------------------------------------------------------------------------
+# Steam profile cache
+# ---------------------------------------------------------------------------
+class SteamCache:
+    def __init__(self, api_key, cache_hours=24):
+        self.api_key = api_key
+        self.cache_seconds = cache_hours * 3600
+        self._cache = {}
+
+    def profile(self, steamid):
+        if not steamid:
+            return {}
+        now = time.time()
+        cached = self._cache.get(steamid)
+        if cached and now - cached["_ts"] < self.cache_seconds:
+            return cached
+        result = {"_ts": now}
+        try:
+            r = requests.get(
+                "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/",
+                params={"key": self.api_key, "steamids": steamid}, timeout=8)
+            r.raise_for_status()
+            players = r.json().get("response", {}).get("players", [])
+            if players:
+                p = players[0]
+                result["persona"] = p.get("personaname")
+                result["avatar"] = p.get("avatarfull") or p.get("avatar")
+                result["profile_url"] = p.get("profileurl")
+        except Exception as e:
+            log.debug("Steam profile lookup failed for %s: %s", steamid, e)
+        if self.api_key:
+            try:
+                r2 = requests.get(
+                    "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
+                    params={"key": self.api_key, "steamid": steamid,
+                            "include_appinfo": 1, "appids_filter[0]": 108600},
+                    timeout=8)
+                r2.raise_for_status()
+                games = r2.json().get("response", {}).get("games", [])
+                if games:
+                    result["pz_hours"] = round(games[0].get("playtime_forever", 0) / 60, 1)
+            except Exception as e:
+                log.debug("Steam hours lookup failed for %s: %s", steamid, e)
+            try:
+                r3 = requests.get(
+                    "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
+                    params={"key": self.api_key, "steamid": steamid, "include_appinfo": 1},
+                    timeout=8)
+                r3.raise_for_status()
+                all_games = r3.json().get("response", {}).get("games", [])
+                recent = sorted(
+                    [g for g in all_games if g.get("appid") != 108600 and g.get("rtime_last_played", 0) > 0],
+                    key=lambda g: g.get("rtime_last_played", 0), reverse=True
+                )[:2]
+                result["recent_games"] = [
+                    {"name": g["name"],
+                     "total_hours": round(g.get("playtime_forever", 0) / 60, 1),
+                     "last_played": g.get("rtime_last_played", 0)}
+                    for g in recent
+                ]
+            except Exception as e:
+                log.debug("Steam recent games lookup failed for %s: %s", steamid, e)
+        self._cache[steamid] = result
+        return result
+
+
+class _NoSteam:
+    def profile(self, steamid):
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Main watcher
+# ---------------------------------------------------------------------------
+class PlayerEventWatcher:
+    def __init__(self, log_path, state_path, discord_url, steam,
+                 kills_file_path=None, db=None,
+                 poll_interval=2.0, respawn_window=300,
+                 server_name="PZ Server"):
+        self.log_path = log_path
+        self.state = State(state_path)
+        self.discord = DiscordWebhook(discord_url) if discord_url else None
+        self.steam = steam
+        self.kills_file = KillsFile(Path(kills_file_path).expanduser()) if kills_file_path else None
         self.db = db
-        self.patterns = {name: re.compile(rx) for name, rx in cfg["patterns"].items()}
-        self.steam = Steam(cfg, state)
-        self.server_name = cfg["server"]["name"]
-        self.unit = cfg["server"].get("unit", "pzserver")
-        self.respawn_window = int(cfg["dizcord"].get("respawn_window", "600"))
-        self._stop_event = threading.Event()
+        self.poll_interval = poll_interval
+        self.respawn_window = respawn_window
+        self.server_name = server_name
+        self.console_patterns = {
+            name: re.compile(rx) for name, rx in _CONSOLE_PATTERNS_RAW.items()
+        }
+        self.conn_patterns = {
+            name: re.compile(rx) for name, rx in _CONNECTIONS_PATTERNS_RAW.items()
+        }
+        self._stop = threading.Event()
 
-        zdir = Path(cfg["server"]["zomboid_dir"]).expanduser()
-        console = cfg["server"].get("console_log") or str(zdir / "server-console.txt")
-        self.console_tail = Tail(lambda: Path(console))
-        logs_dir = Path(cfg["server"].get("logs_dir") or (zdir / "Logs"))
-        self.user_tail = Tail(lambda: self._latest_log(logs_dir, "*_user.txt"))
-        self.conn_tail = Tail(lambda: self._latest_log(logs_dir, "*_connections.txt"))
+    def stop(self):
+        self._stop.set()
 
-        kills_path = cfg["dizcord"].get("kills_file", "").strip()
-        self.kills_file = KillsFile(Path(kills_path).expanduser()) if kills_path else None
+    # ------------------------------------------------------------------
+    # Console log loop (server up/down, deaths)
+    # ------------------------------------------------------------------
+    def run(self):
+        conn_thread = threading.Thread(
+            target=self._run_connections, name="pzp-connections-watcher", daemon=True)
+        conn_thread.start()
 
-    @staticmethod
-    def _latest_log(logs_dir, pattern):
+        path = Path(self.log_path)
+        last_inode = None
         try:
-            candidates = sorted(logs_dir.glob(pattern),
-                                key=lambda p: p.stat().st_mtime)
-            return candidates[-1] if candidates else None
+            last_pos = path.stat().st_size
         except OSError:
-            return None
+            last_pos = 0
+        kills_poll_interval = 30
+        last_kills_poll = 0
+
+        while not self._stop.is_set():
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                self._stop.wait(self.poll_interval)
+                continue
+            current_inode = pc.file_identity(str(path))
+            if last_inode is not None and current_inode != last_inode:
+                last_pos = 0
+            last_inode = current_inode
+            if st.st_size < last_pos:
+                last_pos = 0
+            if st.st_size > last_pos:
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(last_pos)
+                        chunk = f.read()
+                        last_pos = f.tell()
+                    for line in chunk.splitlines():
+                        self._handle_console_line(line)
+                except OSError as e:
+                    log.warning("Error reading console log %s: %s", path, e)
+            now = time.time()
+            if now - last_kills_poll >= kills_poll_interval:
+                self._refresh_kills()
+                last_kills_poll = now
+            self._stop.wait(self.poll_interval)
+
+    # ------------------------------------------------------------------
+    # Connections log loop (join, disconnect, login-queue)
+    # ------------------------------------------------------------------
+    def _run_connections(self):
+        current_path = None
+        last_pos = 0
+        last_inode = None
+
+        while not self._stop.is_set():
+            latest = _find_connections_log()
+
+            if latest != current_path:
+                current_path = latest
+                last_pos = 0
+                last_inode = None
+                if current_path:
+                    try:
+                        last_pos = current_path.stat().st_size
+                    except OSError:
+                        last_pos = 0
+                    log.info("Connections watcher: tailing %s", current_path)
+
+            if current_path is None:
+                self._stop.wait(self.poll_interval)
+                continue
+
+            try:
+                st = current_path.stat()
+            except FileNotFoundError:
+                current_path = None
+                self._stop.wait(self.poll_interval)
+                continue
+
+            current_inode = pc.file_identity(str(current_path))
+            if last_inode is not None and current_inode != last_inode:
+                last_pos = 0
+            last_inode = current_inode
+            if st.st_size < last_pos:
+                last_pos = 0
+            if st.st_size > last_pos:
+                try:
+                    with open(current_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(last_pos)
+                        chunk = f.read()
+                        last_pos = f.tell()
+                    for line in chunk.splitlines():
+                        self._handle_conn_line(line)
+                except OSError as e:
+                    log.warning("Error reading connections log %s: %s", current_path, e)
+
+            self._stop.wait(self.poll_interval)
+
+    def _handle_console_line(self, line):
+        for name, rx in self.console_patterns.items():
+            m = rx.search(line)
+            if m:
+                getattr(self, f"on_{name}")(m, line)
+                break
+
+    def _handle_conn_line(self, line):
+        for name, rx in self.conn_patterns.items():
+            m = rx.search(line)
+            if m:
+                getattr(self, f"on_{name}")(m, line)
+                break
+
+    # ------------------------------------------------------------------
+    # Kill / milestone helpers
+    # ------------------------------------------------------------------
 
     def _refresh_kills(self, force=False):
         if self.kills_file is None:
@@ -479,10 +533,87 @@ class Watcher:
         updated = self.kills_file.poll(force=force)
         if updated is None:
             return
+        # updated: {steamid: {characters: {username: {kills,alive,survived}}, lifetimeKills: N}}
         st = self.state.data
-        st.setdefault("kills_current_run", {}).update(updated)
+        current = st.setdefault("kills_current_run", {})
+        hours_current = st.setdefault("hours_current_run", {})
+        is_first_poll = not current
+
+        for steamid, entry in updated.items():
+            lifetime = entry.get("lifetimeKills", 0)
+            st.setdefault("kills_lifetime_by_steamid", {})[steamid] = lifetime
+            for username, ch in entry.get("characters", {}).items():
+                st.setdefault("logins", {})[username] = steamid
+                new_kills = ch["kills"]
+                old_kills = current.get(username, 0)
+
+                if not ch["alive"] and old_kills > 0 and new_kills == 0:
+                    current.pop(username, None)
+                    hours_current.pop(username, None)
+                    st.setdefault("milestones_life_fired", {}).pop(username, None)
+                    continue
+
+                current[username] = new_kills
+                if ch["survived"] is not None:
+                    hours_current[username] = ch["survived"]
+
+                if is_first_poll and new_kills > 0:
+                    life_fired = st.setdefault("milestones_life_fired", {}).setdefault(username, set())
+                    for t in _LIFE_MILESTONES:
+                        if new_kills >= t:
+                            life_fired.add(t)
+                    lifetime_fired = st.setdefault("milestones_lifetime_fired", {}).setdefault(steamid, set())
+                    for t in _lifetime_milestones_up_to(lifetime):
+                        if lifetime >= t:
+                            lifetime_fired.add(t)
+                elif new_kills > old_kills and self.discord is not None:
+                    self._check_milestones(username, steamid, old_kills, new_kills, lifetime)
+
         st["kills_last_updated"] = time.time()
         self.state.save()
+
+    def _check_milestones(self, username, steamid, old_kills, new_kills, lifetime=None):
+        st = self.state.data
+        life_fired = st.setdefault("milestones_life_fired", {}).setdefault(username, set())
+        lifetime_key = steamid or username
+        lifetime_fired = st.setdefault("milestones_lifetime_fired", {}).setdefault(
+            lifetime_key, set())
+        if lifetime is None:
+            lifetime = st.get("kills_lifetime_by_steamid", {}).get(steamid, new_kills)
+        avatar = (st.get("steam_cache", {}).get(steamid, {}).get("avatar")
+                  if steamid else None)
+
+        for threshold in _LIFE_MILESTONES:
+            if threshold in life_fired:
+                continue
+            if old_kills < threshold <= new_kills:
+                life_fired.add(threshold)
+                msg = _milestone_message(threshold, username, "life")
+                fields = [{"name": "Kills this life", "value": f"{new_kills:,}", "inline": True}]
+                self.discord.embed(
+                    COLOURS["GOLD"],
+                    title=f"\U0001f3c6 Milestone: {threshold:,} kills this life!",
+                    description=msg,
+                    thumbnail=avatar,
+                    fields=fields,
+                )
+
+        old_lifetime = lifetime - new_kills + old_kills
+        for threshold in _lifetime_milestones_up_to(lifetime):
+            if threshold in lifetime_fired:
+                continue
+            if old_lifetime < threshold <= lifetime:
+                lifetime_fired.add(threshold)
+                msg = _milestone_message(threshold, username, "lifetime")
+                fields = [{"name": "Lifetime kills",
+                           "value": f"{lifetime:,}", "inline": True}]
+                self.discord.embed(
+                    COLOURS["GOLD"],
+                    title=f"\U0001f31f Lifetime milestone: {threshold:,} kills!",
+                    description=msg,
+                    thumbnail=avatar,
+                    fields=fields,
+                )
 
     def _kills_field(self, username):
         kills = self.state.data.get("kills_current_run", {}).get(username)
@@ -493,40 +624,27 @@ class Watcher:
     def _roll_kills(self, name, steamid, is_death=False):
         st = self.state.data
         raw = st.get("kills_current_run", {}).pop(name, None)
-        if raw is None:
-            return None
-        mtime = self.kills_file._mtime if self.kills_file else None
-        accounted = st.setdefault("kills_accounted_mtime", {})
-        if mtime is not None and accounted.get(name) == mtime:
-            return raw
-        start_snaps = st.setdefault("session_kills_start", {})
-        start_snap = start_snaps.get(steamid, 0) if steamid else 0
-        delta = max(0, raw - start_snap)
-        lifetime = st.setdefault("kills_lifetime", {})
-        lifetime[name] = lifetime.get(name, 0) + delta
-        if steamid:
-            sess = st.setdefault("session_kills", {})
-            sess[steamid] = sess.get(steamid, 0) + delta
-            if is_death:
-                start_snaps[steamid] = 0
-            else:
-                start_snaps.pop(steamid, None)
-        if mtime is not None:
-            accounted[name] = mtime
+        if is_death:
+            st.get("hours_current_run", {}).pop(name, None)
+            st.setdefault("milestones_life_fired", {}).pop(name, None)
+            if steamid and raw is not None:
+                sess = st.setdefault("session_kills", {})
+                sess[steamid] = sess.get(steamid, 0) + max(0, raw)
         return raw
 
-    def handle_line(self, line):
-        for name, rx in self.patterns.items():
-            m = rx.search(line)
-            if m:
-                getattr(self, f"on_{name}", self.on_unknown)(m, line)
-
-    def on_unknown(self, m, line):
-        pass
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
 
     def on_server_up(self, m, line):
         now = time.time()
-        self.state.data["server_up_since"] = now
+        st = self.state.data
+        st["server_up_since"] = now
+        st["kills_current_run"] = {}
+        st["hours_current_run"] = {}
+        st["milestones_life_fired"] = {}
+        st.pop("session_kills_start", None)
+        st.pop("kills_accounted_mtime", None)
         self.state.save()
         if self.discord is None:
             return
@@ -539,64 +657,25 @@ class Watcher:
                            description=desc)
 
     def _make_cfg(self):
-        import configparser as _cp
-        cfg = _cp.ConfigParser()
-        cfg.read_dict({"server": {
-            "unit": self.unit,
-            "name": self.server_name,
-        }})
+        cfg = configparser.ConfigParser()
+        cfg.read(self._config_path)
         return cfg
 
     def on_server_down(self, m, line):
         st = self.state.data
         up_since = st.get("server_up_since")
-        desc = (f"The server was up for {human_duration(time.time() - up_since)}"
-                if up_since else "Server shutting down.")
+        now = time.time()
+        uptime = human_duration(now - up_since) if up_since else None
         st["server_up_since"] = None
         self.state.save()
-        if self.discord is not None:
-            self.discord.embed(COLOURS["ORANGE"],
-                               title=f"{self.server_name} is going **DOWN**",
-                               description=desc)
+        if self.discord is None:
+            return
+        self.discord.embed(COLOURS["RED"],
+                           title=f"{self.server_name} has gone **OFFLINE**",
+                           description=f"Was up for {uptime}." if uptime else None)
 
-        now = time.time()
-        db_players = []
-        for steamid in list(st["sessions"].keys()):
-            name = st["players"].get(steamid, {}).get("login", steamid)
-            session = now - st["sessions"].pop(steamid)
-            st["totals"][steamid] = st["totals"].get(steamid, 0) + session
-            st["dead"].pop(steamid, None)
-            total = st["totals"][steamid]
-            current_run_kills = self._roll_kills(name, steamid)
-            session_kills_total = st.get("session_kills", {}).pop(steamid, None)
-            lifetime_kills_total = st.get("kills_lifetime", {}).get(name)
-            db_players.append((steamid, name, current_run_kills if current_run_kills is not None else 0))
-            if self.discord is None:
-                continue
-            avatar = st.get("steam_cache", {}).get(steamid, {}).get("avatar")
-            lines = [f"{name} was online for {human_duration(session)}",
-                     f"Total time on server:\n{human_duration(total)}",
-                     "Reason: server stopped"]
-            if total >= 3600:
-                lines.append(f"({int(total // 3600)} Hours)")
-            fields = []
-            if current_run_kills is not None:
-                fields.append({"name": "Kills this run", "value": str(current_run_kills), "inline": True})
-            if session_kills_total is not None:
-                fields.append({"name": "Session kills", "value": str(session_kills_total), "inline": True})
-            if lifetime_kills_total is not None:
-                fields.append({"name": "Lifetime kills", "value": str(lifetime_kills_total), "inline": True})
-            self.discord.embed(COLOURS["RED"], title=f"{name} has disconnected",
-                               description="\n".join(lines), thumbnail=avatar,
-                               fields=fields or None)
-
-        if self.db is not None and db_players:
-            self.db.on_server_down(db_players)
-        self.state.save()
-
-    def on_connecting(self, m, line):
-        d = m.groupdict()
-        steamid = d.get("steamid", "")
+    def on_login_queue(self, m, line):
+        steamid = m.groupdict().get("steamid", "")
         if not steamid:
             return
         self.state.data.setdefault("pending", {})[steamid] = time.time()
@@ -633,6 +712,7 @@ class Watcher:
                     avatar_url=sp_respawn.get("avatar"),
                     pz_hours=sp_respawn.get("pz_hours"),
                     kills_snapshot=0,
+                    hours_survived=0,
                 )
             if self.discord is not None:
                 sp = self.steam.profile(steamid)
@@ -660,6 +740,7 @@ class Watcher:
                 avatar_url=avatar,
                 pz_hours=sp.get("pz_hours"),
                 kills_snapshot=st.get("kills_current_run", {}).get(username, 0),
+                hours_survived=st.get("hours_current_run", {}).get(username, 0),
             )
 
         if self.discord is None:
@@ -667,55 +748,60 @@ class Watcher:
 
         profile = f"https://steamcommunity.com/profiles/{steamid}"
         fields = []
-        account_kills = None
-        char_kills = None
-        if self.db is not None:
-            try:
-                board = self.db.get_killboard()
-                for acc in board:
-                    if acc["steamid"] == steamid:
-                        account_kills = acc["account_kills"]
-                        for c in acc["characters"]:
-                            if c["username"] == username:
-                                char_kills = c["char_kills"]
-                        break
-            except Exception:
-                log.warning("on_join: failed to read db for kill totals", exc_info=True)
 
-        if account_kills is not None:
-            fields.append({"name": "Kills:", "value": str(account_kills), "inline": False})
+        kills_now = st.get("kills_current_run", {}).get(username, 0)
+        session_start = st.get("session_kills_start", {}).get(steamid, kills_now)
+        run_kills_so_far = kills_now - session_start
+        lifetime_kills = st.get("kills_lifetime_by_steamid", {}).get(steamid)
+
+        # Row 1: Hours on Record (full width)
         if sp.get("pz_hours") is not None:
-            fields.append({"name": "Hours on Record:",
+            fields.append({"name": "Hours on Record",
                            "value": f"{sp['pz_hours']:,}", "inline": False})
-        login_line = f"Logging in as **{username}**"
-        if char_kills is not None:
-            fields.append({"name": "\u200b", "value": login_line, "inline": False})
-            fields.append({"name": "Kills:", "value": str(char_kills), "inline": True})
-            run_kills_so_far = st.get("kills_current_run", {}).get(username, 0)
-            fields.append({"name": "Kills this run so far:",
-                           "value": str(run_kills_so_far), "inline": True})
-        else:
-            fields.append({"name": "\u200b", "value": login_line, "inline": False})
-        if sp.get("games"):
-            fields.append({"name": f"{persona} has also played:",
+        # Row 2: Lifetime kills (full width)
+        if lifetime_kills is not None:
+            fields.append({"name": "Lifetime kills", "value": f"{lifetime_kills:,}", "inline": False})
+        # Logging in as (full width) — no spacer needed, inline:False handles the break
+        fields.append({"name": "Logging in as", "value": f"**{username}**", "inline": False})
+        # Survived for | Current run (inline)
+        ingame_survived = _fmt_ingame_time(st.get("hours_current_run", {}).get(username))
+        if ingame_survived:
+            fields.append({"name": "Survived for", "value": ingame_survived, "inline": True})
+        run_kills_str = str(kills_now) if kills_now > 0 else "No kills yet"
+        fields.append({"name": "Current run", "value": f"{run_kills_str} kills", "inline": True})
+        # Spacer before recently played
+        fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
+
+        # Recently played: header + two games side by side
+        recent = sp.get("recent_games", [])
+        if recent:
+            from datetime import datetime
+            fields.append({"name": f"{persona or username} has also played:",
                            "value": "\u200b", "inline": False})
-            for g in sp["games"]:
-                value = f"{g['hours']:,} hrs on record"
-                last = last_played_str(g.get("last"))
-                if last:
-                    value += f"\nLast played: {last}"
-                fields.append({"name": g["name"], "value": value, "inline": True})
+            for g in recent[:2]:
+                hrs = g.get("total_hours", 0)
+                name_g = g.get("name", "?")
+                last_played = g.get("last_played", 0)
+                lp_str = datetime.fromtimestamp(last_played).strftime("%d %b %Y") if last_played else ""
+                val = f"{hrs:,} hrs on record"
+                if lp_str:
+                    val += f"\nLast played: {lp_str}"
+                fields.append({"name": name_g, "value": val, "inline": True})
 
         self.discord.embed(
-            COLOURS["PURPLE"], title="New connection:",
-            description=f"Steam Profile: [{persona}]({profile})",
-            thumbnail=avatar, fields=fields or None)
+            COLOURS["GREEN"],
+            title="New connection:",
+            description=f"Steam Profile: [{persona or username}]({profile})",
+            thumbnail=avatar,
+            fields=fields or None,
+        )
 
     def on_disconnect(self, m, line):
         d = m.groupdict()
         steamid = d.get("steamid", "")
         st = self.state.data
-        was_pending = st.setdefault("pending", {}).pop(steamid, None) is not None
+        was_pending = bool(st.get("pending", {}).pop(steamid, None))
+        self.state.save()
         self._refresh_kills(force=True)
 
         if steamid not in st["sessions"]:
@@ -735,15 +821,20 @@ class Watcher:
         now = time.time()
         session = now - st["sessions"].pop(steamid)
         st["totals"][steamid] = st["totals"].get(steamid, 0) + session
-        current_run_kills = self._roll_kills(name, steamid)
-        session_kills_total = st.get("session_kills", {}).pop(steamid, None)
-        lifetime_kills_total = st.get("kills_lifetime", {}).get(name)
+        # Do NOT call _roll_kills on disconnect — run is not over.
+        current_run_kills = st.get("kills_current_run", {}).get(name)
+        hours_survived = st.get("hours_current_run", {}).get(name)
+        start_snap = st.get("session_kills_start", {}).pop(steamid, 0)
+        partial = (current_run_kills - start_snap) if current_run_kills is not None else 0
+        session_kills_total = st.get("session_kills", {}).pop(steamid, 0) + max(0, partial)
+        lifetime_kills_total = st.get("kills_lifetime_by_steamid", {}).get(steamid)
         self.state.save()
 
         if self.db is not None:
             self.db.on_disconnect(
                 steamid=steamid, username=name,
                 kills_snapshot=current_run_kills if current_run_kills is not None else 0,
+                hours_survived=hours_survived,
             )
 
         if self.discord is None:
@@ -756,12 +847,11 @@ class Watcher:
         if total >= 3600:
             lines.append(f"({int(total // 3600)} Hours)")
         fields = []
+        fields.append({"name": "Kills this session",
+                       "value": str(session_kills_total), "inline": True})
         if current_run_kills is not None:
-            fields.append({"name": "Kills this run", "value": str(current_run_kills), "inline": True})
-        if session_kills_total is not None:
-            fields.append({"name": "Session kills", "value": str(session_kills_total), "inline": True})
-        if lifetime_kills_total is not None:
-            fields.append({"name": "Lifetime kills", "value": str(lifetime_kills_total), "inline": True})
+            fields.append({"name": "Kills this run",
+                           "value": str(current_run_kills), "inline": True})
 
         if steamid in st["dead"]:
             del st["dead"][steamid]
@@ -780,12 +870,18 @@ class Watcher:
         st = self.state.data
         self._refresh_kills(force=True)
         steamid = st["logins"].get(name)
+        if not st["logins"].get(name):
+            log.debug("on_death: %r not in active logins, skipping (likely NPC)", name)
+            return
+
+        hours_survived = st.get("hours_current_run", {}).get(name)
         kills_this_run = self._roll_kills(name, steamid, is_death=True)
 
         if self.db is not None and steamid:
             self.db.on_death(
                 steamid=steamid, username=name,
                 kills_snapshot=kills_this_run if kills_this_run is not None else 0,
+                hours_survived=hours_survived,
             )
 
         if steamid:
@@ -794,105 +890,104 @@ class Watcher:
 
         if self.discord is None:
             return
-        if not steamid:
-            # Name not in active logins -- likely an NPC or engine-internal entity.
-            # Do not post to Discord.
-            return
+
         fields = []
         if kills_this_run is not None:
-            fields.append({"name": "Kills this run", "value": str(kills_this_run), "inline": True})
-            fields.append({"name": "Total kills on server",
-                           "value": str(st["kills_lifetime"].get(name, 0)), "inline": True})
-        self.discord.embed(COLOURS["RED"],
-                           description=random.choice(DEATH_MESSAGES).format(name=name),
-                           fields=fields or None)
+            fields.append({"name": "Kills this life",
+                           "value": f"{kills_this_run:,}", "inline": True})
+            lifetime_after = st.get("kills_lifetime_by_steamid", {}).get(steamid)
+            if lifetime_after is not None:
+                fields.append({"name": "Lifetime kills",
+                               "value": f"{lifetime_after:,}", "inline": True})
+        if hours_survived is not None:
+            ingame = _fmt_ingame_time(hours_survived)
+            if ingame:
+                fields.append({"name": "Survived (in-game)",
+                               "value": ingame, "inline": True})
 
-    def on_denied(self, m, line):
-        if self.discord is not None:
-            self.discord.embed(COLOURS["RED"],
-                               title="Access denied — check your credentials.")
-
-    def stop(self):
-        self._stop_event.set()
-
-    def run(self):
-        self.state.data["watcher_started"] = time.time()
-        self.state.save()
-        poll = float(self.cfg["dizcord"].get("poll_interval", "0.5"))
-        log.info("Player-event watcher watching %s", self.server_name)
-
-        while not self._stop_event.is_set():
-            for tail in (self.console_tail, self.user_tail, self.conn_tail):
-                for line in tail.poll():
-                    self.handle_line(line)
-            self._refresh_kills(force=False)
-            self._stop_event.wait(poll)
-
-        self.console_tail.close()
-        self.user_tail.close()
-        self.conn_tail.close()
-        if self.db is not None:
-            self.db.close()
-        log.info("Player-event watcher stopped.")
+        avatar = (st.get("steam_cache", {}).get(steamid, {}).get("avatar")
+                  if steamid else None)
+        self.discord.embed(
+            COLOURS["ORANGE"],
+            title=f"{name} has now completed their playthrough.",
+            thumbnail=avatar,
+            fields=fields or None,
+        )
 
 
-def build_watcher(config_path=None):
-    if config_path is None:
-        config_path = os.environ.get("PZPANEL_CONFIG") or str(pc.get_default_config_path())
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+def build_watcher(config_path):
+    cfg = configparser.ConfigParser()
+    cfg.read(config_path)
 
-    ini = configparser.ConfigParser()
-    if not ini.read(config_path, encoding="utf-8"):
-        log.warning("Config not found at %s, player-event tracking disabled", config_path)
+    discord_section = None
+    for s in ("discord", "dizcord"):
+        if cfg.has_section(s):
+            discord_section = s
+            break
+
+    log_path = cfg.get("paths", "console_log", fallback="").strip()
+    if not log_path:
+        log.warning("No console_log path configured; player-event watcher disabled")
         return None
 
-    webhook_url = ini.get("discord", "webhook_url", fallback="").strip()
-    if not webhook_url or webhook_url == "CHANGEME":
-        log.info("No [discord] webhook_url configured -- tracking runs, Discord posting disabled")
-        webhook_url = ""
+    webhook_url = ""
+    if discord_section:
+        webhook_url = cfg.get(discord_section, "webhook_url", fallback="").strip()
 
-    server_name = ini.get("server", "name", fallback="PZ Server")
-    server_unit = ini.get("server", "unit", fallback="pzserver")
-    console_log = ini.get("paths", "console_log", fallback="").strip()
-    if not console_log:
-        console_log = str(pc.get_default_data_dir() / "server-console.txt")
-    zomboid_dir = Path(console_log).expanduser().parent
-    logs_dir = ini.get("player_events", "logs_dir", fallback=str(zomboid_dir / "Logs")) \
-        if ini.has_section("player_events") else str(zomboid_dir / "Logs")
+    steam_enabled = cfg.get("steam", "enabled", fallback="false").strip().lower() not in ("false", "0", "no", "")
+    steam_api_key = cfg.get("steam", "api_key", fallback="").strip()
+    cache_hours = int(cfg.get("steam", "cache_hours", fallback="24").strip() or "24")
 
-    patterns = dict(DEFAULT_PATTERNS)
-    if ini.has_section("patterns"):
-        patterns.update(dict(ini["patterns"]))
+    steam = SteamCache(steam_api_key, cache_hours) if steam_enabled else _NoSteam()
 
-    pe = dict(ini["player_events"]) if ini.has_section("player_events") else {}
+    kills_path = ""
+    state_path = ""
+    player_db_path = ""
+    poll_interval = 2.0
+    respawn_window = 300
 
-    cfg = {
-        "server": {
-            "name": server_name,
-            "unit": server_unit,
-            "zomboid_dir": str(zomboid_dir),
-            "console_log": console_log,
-            "logs_dir": logs_dir,
-        },
-        "dizcord": {
-            "poll_interval": pe.get("poll_interval", "0.5"),
-            "respawn_window": pe.get("respawn_window", "600"),
-            "kills_file": pe.get("kills_file", ""),
-        },
-        "steam": dict(ini["steam"]) if ini.has_section("steam") else {},
-        "patterns": patterns,
-    }
+    for section in ("player_events", "dizcord"):
+        if cfg.has_section(section):
+            kills_path = kills_path or cfg.get(section, "kills_file", fallback="").strip()
+            state_path = state_path or cfg.get(section, "state_file", fallback="").strip()
+            player_db_path = player_db_path or cfg.get(section, "player_db", fallback="").strip()
+            try:
+                poll_interval = float(cfg.get(section, "poll_interval", fallback="2").strip() or "2")
+            except ValueError:
+                pass
+            try:
+                respawn_window = int(cfg.get(section, "respawn_window", fallback="300").strip() or "300")
+            except ValueError:
+                pass
 
-    data_dir = pc.get_default_data_dir()
-    state_path = Path(pe.get("state_file", "")).expanduser() if pe.get("state_file") \
-        else data_dir / "player_events_state.json"
-    db_path = Path(pe.get("player_db", "")).expanduser() if pe.get("player_db") \
-        else data_dir / "player_db.sqlite"
+    db = pdb.PlayerDB(player_db_path) if player_db_path else None
 
-    discord = Discord(webhook_url) if webhook_url else None
-    state = State(state_path)
-    try:
-        player_database = pdb.PlayerDB(db_path)
-    except Exception:
-        log.exception("Failed to open PlayerDB at %s, continuing without it", db_path)
-        player_database = None
-    return Watcher(cfg, discord, state, db=player_database)
+    server_name = cfg.get("server", "name", fallback="PZ Server").strip()
+    ini_path = cfg.get("paths", "server_ini", fallback="").strip()
+    if ini_path and Path(ini_path).exists():
+        try:
+            for raw in Path(ini_path).read_text(encoding="utf-8", errors="replace").splitlines():
+                if raw.strip().lower().startswith("publicname="):
+                    v = raw.partition("=")[2].strip()
+                    if v:
+                        server_name = v
+                    break
+        except OSError:
+            pass
+
+    watcher = PlayerEventWatcher(
+        log_path=log_path,
+        state_path=state_path or None,
+        discord_url=webhook_url,
+        steam=steam,
+        kills_file_path=kills_path or None,
+        db=db,
+        poll_interval=poll_interval,
+        respawn_window=respawn_window,
+        server_name=server_name,
+    )
+    watcher._config_path = config_path
+    return watcher

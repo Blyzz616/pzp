@@ -8,33 +8,28 @@ whether this panel, the CLI, or a reboot triggers the stop.
 
 Cross-platform: Linux (systemd) and Windows (sc or process mode).
 See platform_compat.py for all OS-specific operations.
-CONFIG_PATH defaults to /opt/pzp/pzpanel.ini on Linux and to the
-directory alongside main.py on Windows. Override with PZPANEL_CONFIG
-environment variable.
+CONFIG_PATH is defined in server_config.py and defaults to
+/opt/pzp/pzpanel.ini on Linux or alongside main.py on Windows.
+Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "4.1.3"
+__version__ = "4.2.5"
 
 import asyncio
-import configparser
 import html
 import json
 import logging
 import os
-import random
-import re
 import shutil
 import subprocess
 import threading
-import time
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 
 from rcon import RCONClient
 from modcheck import (check_for_updates, add_workshop_item, remove_workshop_item,
@@ -45,17 +40,29 @@ from automation import is_paused, set_paused
 import countdown_control as cc
 import removed_mods
 import discord_module
+from discord_module import _fmt_ingame_time
 import player_db as pdb
 import platform_compat as pc
+
+from server_config import (
+    CONFIG_PATH, ALLOWED_ACTIONS,
+    load_server_config, load_console_log_path, load_server_ini_path,
+    get_multiplayer_save_dir, get_server_state, run_server_action,
+    load_rcon_config, rcon_reachable, _countdown_summary,
+    _read_all_settings, _update_ini_settings, _update_realm_ini,
+    _find_candidate_files, _find_exact_named_files,
+    _read_realm_ini, _bool_val, _ini_bool,
+    SETTINGS_GROUPS, SETTINGS_SCHEMA, _REALM_GROUPS,
+)
+from ui_helpers import (
+    PAGE_STYLE, page_shell, _led_style,
+    _fmt_ts, _fmt_log_time, _fmt_removed_at,
+    _steam_id_link, _mod_identity_cells, _thumb_html, _mod_status_tag,
+)
 
 log = logging.getLogger("pzpanel")
 
 app = FastAPI(title="PZ Panel")
-
-CONFIG_PATH = str(os.environ.get("PZPANEL_CONFIG") or pc.get_default_config_path())
-
-ALLOWED_ACTIONS = ("start", "stop", "restart")
-ACTION_TIMEOUTS = {"start": 20, "stop": 150, "restart": 150}
 
 _SCRIPT_DIR = Path(__file__).parent
 _FAVICON_DIR = (_SCRIPT_DIR / "favicon" if (_SCRIPT_DIR / "favicon").exists()
@@ -69,7 +76,6 @@ def favicon_ico():
     ico = _FAVICON_DIR / "favicon.ico"
     if ico.exists():
         return FileResponse(str(ico))
-    from fastapi.responses import Response
     return Response(status_code=204)
 
 
@@ -102,632 +108,14 @@ async def _on_shutdown():
             _player_event_thread.join(timeout=5)
 
 
-PAGE_STYLE = """
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-:root {
-  --void: #0a0d09; --panel: #12160f; --line: #2b3324;
-  --ink: #e8e3d2; --ink-dim: #8b9179;
-  --amber: #ffb020; --amber-dim: #7a5a1a;
-  --rust: #c2432b; --rust-dim: #5c2418;
-  --signal: #6fbf5a; --signal-dim: #34401f;
-  --info: #3a7fb8;
-}
-* { box-sizing: border-box; }
-body { margin:0; background:var(--void);
-  background-image: radial-gradient(ellipse at top left,rgba(255,176,32,.05),transparent 50%),radial-gradient(ellipse at bottom right,rgba(111,191,90,.04),transparent 50%);
-  color:var(--ink); font-family:'Inter',system-ui,sans-serif; min-height:100vh; }
-.hazard-bar { height:7px; background:repeating-linear-gradient(135deg,var(--amber),var(--amber) 14px,#171203 14px,#171203 28px); }
-.hazard-bar.danger { background:repeating-linear-gradient(135deg,var(--rust),var(--rust) 14px,#171203 14px,#171203 28px); }
-.hazard-frame { background:repeating-linear-gradient(135deg,var(--amber),var(--amber) 14px,#171203 14px,#171203 28px); padding:7px; border-radius:3px; }
-.hazard-frame.danger { background:repeating-linear-gradient(135deg,var(--rust),var(--rust) 14px,#171203 14px,#171203 28px); }
-.hazard-frame-inner { background:var(--panel); border-radius:2px; padding:1.25rem 1.5rem; }
-.wrap { max-width:760px; margin:0 auto; padding:2.5rem 1.5rem 3rem; }
-.eyebrow { font-family:'JetBrains Mono',monospace; font-size:.72rem; letter-spacing:.18em; color:var(--ink-dim); text-transform:uppercase; margin:0 0 .35rem; }
-h1 { font-family:'Oswald',sans-serif; font-weight:700; font-size:2rem; letter-spacing:.02em; text-transform:uppercase; margin:0 0 1.5rem; }
-nav.tabs { display:flex; align-items:center; gap:1.5rem; margin-bottom:1.75rem; font-family:'JetBrains Mono',monospace; font-size:.78rem; letter-spacing:.06em; text-transform:uppercase; }
-nav.tabs a { color:var(--ink-dim); text-decoration:none; padding-bottom:.3rem; border-bottom:2px solid transparent; transition:color .15s,border-color .15s; }
-nav.tabs a:hover,nav.tabs a.active { color:var(--amber); border-color:var(--amber); }
-nav.tabs a:focus-visible { outline:2px solid var(--amber); outline-offset:3px; }
-nav.tabs a.icon-tab { display:inline-flex; align-items:center; margin-left:auto; }
-nav.tabs a.icon-tab svg { display:block; }
-.panel { background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:1.75rem 1.75rem 0; }
-.readout { display:flex; align-items:center; gap:.85rem; margin-bottom:1.75rem; flex-wrap:wrap; }
-.led { width:13px; height:13px; border-radius:50%; flex-shrink:0; background:var(--led-colour,var(--ink-dim)); box-shadow:0 0 10px 2px var(--led-colour,transparent); }
-.led.pulse { animation:ledpulse 1.7s ease-in-out infinite; }
-@keyframes ledpulse { 0%{opacity:1}8%{opacity:.4}10%{opacity:1}30%{opacity:.85}33%{opacity:1}55%{opacity:.3}60%{opacity:1}80%{opacity:.92}100%{opacity:1} }
-@media(prefers-reduced-motion:reduce){.led.pulse{animation:none}}
-.readout-label { font-family:'JetBrains Mono',monospace; font-size:1rem; letter-spacing:.1em; text-transform:uppercase; }
-.readout-sub { font-family:'JetBrains Mono',monospace; font-size:.72rem; color:var(--ink-dim); margin-left:auto; }
-.actions { display:flex; gap:.6rem; flex-wrap:wrap; }
-.actions form { margin:0; }
-.btn { font-family:'JetBrains Mono',monospace; font-weight:600; font-size:.8rem; letter-spacing:.08em; text-transform:uppercase; padding:.65rem 1.3rem; border:1px solid var(--line); border-radius:2px; background:#1a2016; color:var(--ink); cursor:pointer; transition:filter .12s,transform .05s; }
-.btn:hover{filter:brightness(1.25)}.btn:active{transform:translateY(1px)}.btn:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
-.btn.primary{background:var(--amber-dim);border-color:var(--amber);color:#fff3dc}
-.btn.info{background:#16324a;border-color:var(--info);color:#dcefff}
-.btn.danger{background:var(--rust-dim);border-color:var(--rust);color:#ffe3dc}
-a.link{color:var(--amber);text-decoration:none}a.link:hover{text-decoration:underline}
-.note { font-family:'JetBrains Mono',monospace; font-size:.72rem; color:var(--ink-dim); line-height:1.6; margin-top:1.5rem; padding-top:1rem; border-top:1px solid var(--line); }
-.banner{font-size:.85rem;margin:0 0 1.25rem;padding:.6rem .9rem;border-radius:2px;border:1px solid currentColor}
-.banner.success{color:var(--signal);background:rgba(111,191,90,.08)}
-.banner.error{color:var(--rust);background:rgba(194,67,43,.08)}
-table{width:100%;border-collapse:collapse}
-th{text-align:left;font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-dim);padding:0 .7rem .6rem;border-bottom:1px solid var(--line)}
-td{padding:.7rem;border-bottom:1px solid var(--line);font-size:.9rem;vertical-align:middle}
-td.mono{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--ink-dim)}
-.tag{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;padding:.25rem .55rem;border-radius:2px;border:1px solid currentColor;background:transparent;white-space:nowrap;cursor:help}
-.tag.ok{color:var(--signal);background:rgba(111,191,90,.08)}.tag.warn{color:var(--amber);background:rgba(255,176,32,.08)}
-.tag.info{color:#8fc4ea;background:rgba(58,127,184,.1)}.tag.muted{color:var(--ink-dim);background:rgba(139,145,121,.08)}
-.thumb{width:40px;height:40px;object-fit:cover;border-radius:2px;border:1px solid var(--line);display:block}
-.thumb-empty{background:#1a2016}.thumb-lg{width:96px;height:96px;object-fit:cover;border-radius:2px;border:1px solid var(--line);flex-shrink:0}
-.thumb-btn{background:none;border:none;padding:0;cursor:pointer;display:block}.thumb-btn:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
-.link-id{color:var(--amber);font-family:'JetBrains Mono',monospace;font-size:.8rem;text-decoration:none}
-.link-id:hover{text-decoration:underline}
-.lookup-form{display:flex;gap:.6rem;margin-bottom:1.25rem}
-.input{font-family:'JetBrains Mono',monospace;background:#0d110a;border:1px solid var(--line);color:var(--ink);padding:.6rem .8rem;border-radius:2px;flex:1}
-.input:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
-.preview{display:flex;gap:1rem;align-items:center;margin:.5rem 0 1rem}
-.preview-title{font-family:'Oswald',sans-serif;font-size:1.15rem;margin:0 0 .25rem;text-transform:none}
-code{font-family:'JetBrains Mono',monospace;background:#0d110a;padding:.1rem .35rem;border-radius:2px;font-size:.85em}
-.link-remove{color:var(--rust);background:none;border:none;font-family:'JetBrains Mono',monospace;font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;padding:0}
-.link-remove:hover{text-decoration:underline}
-.link-add{color:var(--signal);background:none;border:none;font-family:'JetBrains Mono',monospace;font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;padding:0}
-.link-add:hover{text-decoration:underline}
-.link-title{color:var(--ink);background:none;border:none;padding:0;font:inherit;text-align:left;cursor:pointer}
-.link-title:hover{color:var(--amber);text-decoration:underline}
-.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(10,13,9,.78);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:1.25rem;z-index:100}
-.modal-backdrop.open{display:flex}
-.modal-box{background:var(--panel);border:1px solid var(--modal-accent,var(--rust));border-radius:3px;max-width:440px;width:100%;max-height:85vh;overflow-y:auto;padding:1.75rem}
-.modal-thumb{width:100%;max-width:280px;aspect-ratio:1/1;object-fit:cover;border-radius:2px;border:1px solid var(--line);display:block;margin:0 auto 1.1rem}
-.modal-eyebrow{font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--modal-accent,var(--rust));margin:0 0 .4rem}
-.modal-title{font-family:'Oswald',sans-serif;font-size:1.25rem;margin:0 0 .3rem;text-transform:none}
-.modal-meta{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--ink-dim);margin:0 0 1rem}
-.modal-desc{font-size:.85rem;line-height:1.6;color:var(--ink);margin:0 0 1.4rem}
-.modal-actions{display:flex;gap:.6rem;justify-content:flex-end}.modal-actions form{margin:0}
-.footer-version{text-align:center;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--ink-dim);opacity:.6;margin:1.5rem 0 0}
-.console-toolbar{display:flex;gap:.6rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap}
-.console-toolbar .input{flex:1;min-width:140px}
-.console-status{font-family:'JetBrains Mono',monospace;font-size:.72rem;margin-left:auto;white-space:nowrap}
-.console-path{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--ink-dim);margin:0 0 .75rem;word-break:break-all}
-.console-box{background:#050704;border:1px solid var(--line);border-radius:2px;padding:1rem;height:60vh;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:.76rem;line-height:1.55;color:var(--ink);white-space:pre-wrap;word-break:break-word;margin:0;scrollbar-width:thin;scrollbar-color:var(--amber-dim) var(--void)}
-.console-box::-webkit-scrollbar{width:10px}.console-box::-webkit-scrollbar-track{background:var(--void)}
-.console-box::-webkit-scrollbar-thumb{background:var(--amber-dim);border-radius:2px;border:2px solid var(--void)}
-.console-box::-webkit-scrollbar-thumb:hover{background:var(--amber)}
-.lvl-log{color:var(--ink);font-weight:600}.lvl-warn{color:var(--amber);font-weight:700}.lvl-error{color:var(--rust);font-weight:700}
-.drag-handle{cursor:grab;color:var(--ink-dim);text-align:center;font-size:1.1rem;user-select:none;width:1.6rem}
-.drag-handle:active{cursor:grabbing}tr.dragging{opacity:.35}
-.cfg-section{margin-bottom:0;padding-bottom:0;border-bottom:1px solid var(--line)}
-.cfg-section:last-child{border-bottom:1px solid var(--line)}
-.cfg-section-title{font-family:'Oswald',sans-serif;font-size:1.1rem;letter-spacing:.04em;text-transform:uppercase;margin:0;color:var(--amber);padding:.9rem 0;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none}
-.cfg-section-title:hover{color:#ffc840}
-.cfg-section-title .cfg-chevron{font-size:.75rem;transition:transform .2s;display:inline-block}
-.cfg-section-title.collapsed .cfg-chevron{transform:rotate(-90deg)}
-.cfg-section-body{padding-bottom:1.25rem}
-.cfg-group{margin-bottom:1rem;display:flex;flex-direction:column;gap:.35rem}
-.cfg-label{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.05em}
-.cfg-help{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--ink-dim);opacity:.7;line-height:1.5}
-.cfg-disabled{opacity:.35;pointer-events:none}
-.toggle-wrap{display:flex;align-items:center;gap:.75rem}
-.toggle{position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0}
-.toggle input{opacity:0;width:0;height:0}
-.toggle-slider{position:absolute;inset:0;background:#1a2016;border:1px solid var(--line);border-radius:24px;cursor:pointer;transition:background .2s,border-color .2s}
-.toggle-slider:before{content:'';position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:var(--ink-dim);transition:transform .2s,background .2s}
-.toggle input:checked+.toggle-slider{background:var(--signal-dim);border-color:var(--signal)}
-.toggle input:checked+.toggle-slider:before{transform:translateX(20px);background:var(--signal)}
-.range-wrap{display:flex;align-items:center;gap:.75rem}
-.range-wrap input[type=range]{flex:1;accent-color:var(--amber);background:#1a2016;border-radius:2px}
-.range-value{font-family:'JetBrains Mono',monospace;font-size:.85rem;min-width:4rem;text-align:right;background:#0d110a;border:1px solid var(--line);border-radius:2px;padding:.3rem .5rem;color:var(--ink)}
-.checkbox-group{display:flex;flex-wrap:wrap;gap:.5rem 1rem}
-.checkbox-item{display:flex;align-items:center;gap:.4rem;font-size:.85rem}
-.checkbox-item input{accent-color:var(--amber)}
-.pw-wrap{position:relative;display:flex}
-.pw-wrap .input{flex:1;padding-right:2.5rem}
-.pw-eye{position:absolute;right:.6rem;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--ink-dim);padding:.2rem;display:flex;align-items:center}
-.cfg-save-bar{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top:1px solid var(--amber);padding:.75rem 1.5rem;display:flex;align-items:center;justify-content:flex-end;gap:1rem;z-index:50;transform:translateY(100%);transition:transform .2s}
-.cfg-save-bar.visible{transform:translateY(0)}
-</style>
-"""
+# Wrap page_shell to inject version automatically
+def _page(title, active_tab, body_html, extra_head=""):
+    return page_shell(title, active_tab, body_html, extra_head=extra_head, version=__version__)
 
 
-def load_server_config():
-    """Returns (display_name, unit).
-
-    Display name priority:
-      1. PublicName key in the server .ini file (the PZ world config)
-      2. The server .ini file's own stem (e.g. 'servertest' from servertest.ini)
-      3. [server] name in pzpanel.ini (fallback if no server_ini configured)
-    """
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    unit = cfg.get("server", "unit", fallback="pzserver")
-    pzpanel_name = cfg.get("server", "name", fallback="PZ Server")
-    server_ini = cfg.get("paths", "server_ini", fallback="").strip()
-    if server_ini:
-        ini_path = Path(server_ini)
-        server_ini_vals = _read_realm_ini(server_ini)
-        public_name = server_ini_vals.get("PublicName", "").strip()
-        if public_name:
-            return public_name, unit
-        if ini_path.stem:
-            return ini_path.stem, unit
-    return pzpanel_name, unit
-
-
-def load_console_log_path():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    return cfg.get("paths", "console_log", fallback="")
-
-
-def load_server_ini_path():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    return cfg.get("paths", "server_ini", fallback="").strip() or None
-
-
-def get_multiplayer_save_dir():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    raw = cfg.get("paths", "multiplayer_save_dir", fallback="").strip()
-    return Path(raw) if raw else None
-
-
-def _load_full_cfg():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    return cfg
-
-
-def get_server_state():
-    cfg = _load_full_cfg()
-    raw = pc.get_raw_server_state(cfg)
-    if raw == "inactive":
-        return "offline"
-    if raw == "failed":
-        return "failed"
-    if raw in ("active", "starting"):
-        return "online" if rcon_reachable() else "starting"
-    return raw
-
-
-def run_server_action(action, cfg=None):
-    if action not in ALLOWED_ACTIONS:
-        raise ValueError(f"disallowed action: {action!r}")
-    if cfg is None:
-        cfg = _load_full_cfg()
-    if action == "start":
-        return pc.server_start(cfg)
-    if action == "stop":
-        return pc.server_stop(cfg, rcon_quit_fn=_rcon_quit)
-    if action == "restart":
-        return pc.server_restart(cfg, rcon_quit_fn=_rcon_quit)
-
-
-def _rcon_quit():
-    host, port, password = load_rcon_config()
-    from rcon import RCONClient
-    try:
-        with RCONClient(host, port, password, timeout=5.0) as client:
-            client.command("quit")
-    except Exception as e:
-        log.warning("_rcon_quit: %s", e)
-
-
-def load_rcon_config():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    return (
-        cfg.get("rcon", "host", fallback="127.0.0.1"),
-        cfg.getint("rcon", "port", fallback=27015),
-        cfg.get("rcon", "password", fallback=""),
-    )
-
-
-def rcon_reachable():
-    host, port, password = load_rcon_config()
-    try:
-        with RCONClient(host, port, password, timeout=2.0):
-            return True
-    except Exception:
-        return False
-
-
-def _led_style(colour):
-    delay = random.uniform(-1.6, 0)
-    return f"--led-colour:{colour}; animation-delay:{delay:.2f}s;"
-
-
-def _countdown_summary():
-    countdown_state = cc.get_countdown_state()
-    countdown = None
-    if countdown_state and countdown_state.get("active"):
-        if countdown_state.get("paused"):
-            remaining_display = cc.format_remaining(countdown_state.get("paused_remaining") or 0)
-        else:
-            target_epoch = countdown_state.get("target_epoch", time.time())
-            remaining_display = cc.format_remaining(max(0, target_epoch - time.time()))
-        countdown = {
-            "paused": bool(countdown_state.get("paused")),
-            "remaining_display": remaining_display,
-            "mods": ", ".join(countdown_state.get("mods", [])),
-        }
-    postponed_state = cc.get_postponed_state()
-    postponed = None
-    if postponed_state and postponed_state.get("scheduled") and postponed_state.get("target_epoch"):
-        target_epoch = postponed_state["target_epoch"]
-        local_dt = datetime.fromtimestamp(target_epoch).astimezone()
-        today = datetime.now().astimezone().date()
-        suffix = " (tomorrow)" if local_dt.date() != today else ""
-        postponed = {
-            "label": f"{local_dt.strftime('%H:%M')}{suffix}",
-            "mods": ", ".join(postponed_state.get("mods", [])),
-        }
-    return countdown, postponed
-
-
-SETTINGS_GROUPS = [
-    {
-        "group": "Connection",
-        "help": "Required — the panel cannot control your server without these.",
-        "collapsed": False,
-        "fields": [
-            {"section": "rcon", "key": "host", "label": "RCON Host", "type": "text"},
-            {"section": "rcon", "key": "port", "label": "RCON Port", "type": "number"},
-            {"section": "rcon", "key": "password", "label": "RCON Password", "type": "password", "sensitive": True},
-        ],
-    },
-    {
-        "group": "Paths",
-        "help": "Required — point these at your server files so the panel can read mods, status, and logs.",
-        "collapsed": False,
-        "fields": [
-            {"section": "paths", "key": "server_ini", "label": "World Config (.ini) Path", "type": "text", "assist": "find-ini",
-             "help": "Your world's server .ini file. Can be named anything (e.g. servertest.ini)."},
-            {"section": "paths", "key": "workshop_acf", "label": "Workshop ACF Path", "type": "text", "assist": "find-acf"},
-            {"section": "paths", "key": "console_log", "label": "Console Log Path", "type": "text", "assist": "derive-console-log"},
-            {"section": "paths", "key": "multiplayer_save_dir", "label": "Multiplayer Save Dir", "type": "text", "assist": "derive-save-dir",
-             "help": "Enables the Danger Zone (world wipe) on the Status page. Leave blank to hide it."},
-        ],
-    },
-    {
-        "group": "Server Control",
-        "help": "How the panel starts and stops your server. Linux uses systemd; Windows uses a service or a batch file.",
-        "collapsed": True,
-        "os_toggle": True,
-        "fields": [
-            {"section": "server", "key": "name", "label": "Display Name (fallback)", "type": "text",
-             "help": "Only used if no World Config .ini is set above. The panel normally reads the name from PublicName in the server .ini."},
-            {"section": "server", "key": "unit", "label": "Systemd Unit Name", "type": "text", "os": "linux",
-             "help": "The systemd unit that runs your PZ server (e.g. pzserver)."},
-            {"section": "server", "key": "unit", "label": "Windows Service Name", "type": "text", "os": "windows",
-             "help": "The Windows service name as registered with sc.exe or NSSM (sc mode only)."},
-            {"section": "server", "key": "windows_mode", "label": "Windows Mode", "type": "text", "os": "windows",
-             "help": "'sc' — Windows Service (recommended). 'process' — pzpanel launches the server itself."},
-            {"section": "server", "key": "windows_start_script", "label": "Windows Start Script", "type": "text", "os": "windows",
-             "help": "Process mode only: path to your server's .bat or .exe start file."},
-        ],
-    },
-    {
-        "group": "Discord Integration",
-        "help": "Optional — post join/leave/death embeds and mod-update announcements to a Discord channel. Needs a panel restart to take effect.",
-        "collapsed": True,
-        "fields": [
-            {"section": "discord", "key": "webhook_url", "label": "Webhook URL", "type": "password", "sensitive": True,
-             "help": "Create a webhook in Discord: Server Settings → Integrations → Webhooks."},
-        ],
-    },
-    {
-        "group": "Steam Enrichment",
-        "help": "Optional — adds Steam persona names, avatars, and PZ hours to join embeds. Needs a panel restart to take effect.",
-        "collapsed": True,
-        "fields": [
-            {"section": "steam", "key": "enabled", "label": "Enabled", "type": "checkbox"},
-            {"section": "steam", "key": "api_key", "label": "Steam Web API Key", "type": "password", "sensitive": True,
-             "help": "Free at steamcommunity.com/dev/apikey"},
-            {"section": "steam", "key": "cache_hours", "label": "Cache Hours", "type": "number"},
-        ],
-    },
-    {
-        "group": "Kill Tracking (PZP Mod)",
-        "help": "Optional — enables the Killboard page. Requires the PZP Lua mod (Workshop ID 3793020885) installed on your server. Needs a panel restart to take effect.",
-        "collapsed": True,
-        "fields": [
-            {"section": "player_events", "key": "kills_file", "label": "Kills File Path", "type": "text",
-             "help": "Path to pzp_player_kills.txt written by the PZP mod."},
-            {"section": "player_events", "key": "player_db", "label": "Player DB Path", "type": "text",
-             "help": "SQLite database for persistent player/kill tracking."},
-            {"section": "player_events", "key": "state_file", "label": "Player-Event State File", "type": "text"},
-            {"section": "player_events", "key": "poll_interval", "label": "Poll Interval (sec)", "type": "number"},
-            {"section": "player_events", "key": "respawn_window", "label": "Respawn Window (sec)", "type": "number",
-             "help": "A death followed by a rejoin within this many seconds counts as a respawn, not a new connection."},
-            {"section": "player_events", "key": "logs_dir", "label": "Logs Dir Override", "type": "text",
-             "help": "Override the Logs/ directory location if it's not alongside console_log."},
-        ],
-    },
-]
-
-# Flat list for save handler
-SETTINGS_SCHEMA = [f for g in SETTINGS_GROUPS for f in g["fields"]]
-
-
-def _read_all_settings():
-    cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH)
-    return {section: dict(cfg[section]) for section in cfg.sections()}
-
-
-def _update_ini_settings(updates):
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-    for (section, key), value in updates.items():
-        sec_start = None
-        sec_end = len(lines)
-        for i, line in enumerate(lines):
-            m = section_re.match(line)
-            if m:
-                if sec_start is not None:
-                    sec_end = i
-                    break
-                if m.group(1).strip().lower() == section.lower():
-                    sec_start = i
-        if sec_start is None:
-            if lines and not lines[-1].endswith("\n"):
-                lines[-1] += "\n"
-            lines.append(f"\n[{section}]\n")
-            lines.append(f"{key} = {value}\n")
-            continue
-        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=.*$", re.IGNORECASE)
-        found = False
-        for i in range(sec_start + 1, sec_end):
-            if key_re.match(lines[i]):
-                lines[i] = f"{key} = {value}\n"
-                found = True
-                break
-        if not found:
-            insert_at = sec_end
-            while insert_at > sec_start + 1 and lines[insert_at - 1].strip() == "":
-                insert_at -= 1
-            lines.insert(insert_at, f"{key} = {value}\n")
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-
-
-def _update_realm_ini(ini_path, updates):
-    ini_path = Path(ini_path)
-    backup_dir = ini_path.parent / "backups"
-    backup_dir.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    backup_path = backup_dir / f"{ini_path.name}.{ts}"
-    import shutil as _shutil
-    _shutil.copy2(str(ini_path), str(backup_path))
-    existing = sorted(backup_dir.glob(f"{ini_path.name}.*"))
-    for old in existing[:-20]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
-    with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-    key_re_cache = {}
-    for key, value in updates.items():
-        rx = key_re_cache.setdefault(key, re.compile(rf"^\s*{re.escape(key)}\s*=.*$", re.IGNORECASE))
-        found = False
-        for i, line in enumerate(lines):
-            if rx.match(line):
-                lines[i] = f"{key}={value}\n"
-                found = True
-                break
-        if not found:
-            lines.append(f"{key}={value}\n")
-    with open(ini_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-
-
-def _find_candidate_files(extension, content_markers, search_roots=None, max_results=8, max_scanned=3000):
-    if search_roots is None:
-        search_roots = pc.default_search_roots()
-    candidates = []
-    seen = set()
-    scanned = 0
-    for root in search_roots:
-        try:
-            if not root.exists():
-                continue
-            for p in root.rglob(f"*.{extension}"):
-                scanned += 1
-                if scanned > max_scanned:
-                    return candidates
-                sp = str(p)
-                if sp in seen:
-                    continue
-                seen.add(sp)
-                try:
-                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                        head = f.read(4096)
-                except OSError:
-                    continue
-                if any(marker.lower() in head.lower() for marker in content_markers):
-                    candidates.append(sp)
-                if len(candidates) >= max_results:
-                    return candidates
-        except (OSError, PermissionError):
-            continue
-    return candidates
-
-
-def _find_exact_named_files(filename, content_markers=None, search_roots=None, max_results=8, max_scanned=3000):
-    if search_roots is None:
-        search_roots = pc.default_search_roots()
-    candidates = []
-    seen = set()
-    scanned = 0
-    for root in search_roots:
-        try:
-            if not root.exists():
-                continue
-            for p in root.rglob(filename):
-                scanned += 1
-                if scanned > max_scanned:
-                    return candidates
-                sp = str(p)
-                if sp in seen:
-                    continue
-                seen.add(sp)
-                if content_markers:
-                    try:
-                        with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                            head = f.read(4096)
-                    except OSError:
-                        continue
-                    if not any(marker.lower() in head.lower() for marker in content_markers):
-                        continue
-                candidates.append(sp)
-                if len(candidates) >= max_results:
-                    return candidates
-        except (OSError, PermissionError):
-            continue
-    return candidates
-
-
-def page_shell(title, active_tab, body_html, extra_head=""):
-    server_name, _ = load_server_config()
-
-    def tab(href, label, key):
-        cls = "active" if key == active_tab else ""
-        return f'<a href="{href}" class="{cls}">{label}</a>'
-
-    def icon_tab(href, key, title_attr, svg):
-        cls = "active icon-tab" if key == active_tab else "icon-tab"
-        return (f'<a href="{href}" class="{cls}" title="{html.escape(title_attr)}" '
-                f'aria-label="{html.escape(title_attr)}">{svg}</a>')
-
-    cog_svg = (
-        '<svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
-        '<circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="3"/>'
-        '<rect id="pzp-cog-tooth" x="10.4" y="3.6" width="3.2" height="3.4" rx="0.6"/>'
-        '<use href="#pzp-cog-tooth" transform="rotate(60 12 12)"/>'
-        '<use href="#pzp-cog-tooth" transform="rotate(120 12 12)"/>'
-        '<use href="#pzp-cog-tooth" transform="rotate(180 12 12)"/>'
-        '<use href="#pzp-cog-tooth" transform="rotate(240 12 12)"/>'
-        '<use href="#pzp-cog-tooth" transform="rotate(300 12 12)"/>'
-        '</svg>'
-    )
-
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>{title}</title>
-    {extra_head}
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="48x48" href="/favicon/favicon-48x48.png">
-    <link rel="icon" type="image/png" sizes="64x64" href="/favicon/favicon-64x64.png">
-    <link rel="apple-touch-icon" sizes="128x128" href="/favicon/favicon-128x128.png">
-    <link rel="apple-touch-icon" sizes="256x256" href="/favicon/favicon-256x256.png">
-    {PAGE_STYLE}
-</head>
-<body>
-    <div class="hazard-bar"></div>
-    <div class="wrap">
-        <p class="eyebrow">{html.escape(server_name)} &middot; Survivor Ops Terminal</p>
-        <h1>PZ Panel</h1>
-        <nav class="tabs">
-            {tab("/", "Status", "status")}
-            {tab("/config", "Config", "config")}
-            {tab("/mods", "Mod Manifest", "mods")}
-            {tab("/killboard", "Killboard", "killboard")}
-            {tab("/console", "Console", "console")}
-            {tab("/log", "Log", "log")}
-            {icon_tab("/settings", "settings", "Settings", cog_svg)}
-        </nav>
-        <div class="panel">
-            {body_html}
-        </div>
-        <p class="footer-version">pzpanel v{__version__}</p>
-    </div>
-</body>
-</html>"""
-
-
-def _fmt_ts(ts):
-    if ts is None:
-        return "\u2014"
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-
-def _fmt_log_time(iso_str):
-    try:
-        dt = datetime.fromisoformat(iso_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return iso_str or "\u2014"
-
-
-def _fmt_removed_at(iso_str):
-    try:
-        dt = datetime.fromisoformat(iso_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        local_dt = dt.astimezone()
-        age = datetime.now().astimezone() - local_dt
-        if age <= timedelta(days=7):
-            return local_dt.strftime("%a %d %b %Y %H:%M")
-        return local_dt.strftime("%d %b %Y")
-    except Exception:
-        return iso_str or "\u2014"
-
-
-def _steam_id_link(mod_id):
-    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}"
-    return (f'<a class="link-id" href="{html.escape(url, quote=True)}" '
-            f'target="_blank" rel="noopener noreferrer">{html.escape(mod_id)}</a>')
-
-
-def _mod_identity_cells(mod_id, title, preview_url, description, desc_limit=800):
-    mod_id = mod_id or ""
-    title = title or mod_id
-    desc_snippet = (description or "")[:desc_limit]
-    data_attrs = (
-        f'data-mod-id="{html.escape(mod_id, quote=True)}" '
-        f'data-title="{html.escape(title, quote=True)}" '
-        f'data-preview="{html.escape(preview_url or "", quote=True)}" '
-        f'data-description="{html.escape(desc_snippet, quote=True)}"'
-    )
-    thumb_html = (
-        f'<button type="button" class="thumb-btn" {data_attrs} onclick="openDetailModal(this)">'
-        f'{_thumb_html(preview_url)}</button>'
-    )
-    title_html = (
-        f'<button type="button" class="link-title" {data_attrs} onclick="openDetailModal(this)">'
-        f'{html.escape(title)}</button>'
-    )
-    return thumb_html, title_html
-
-
-def _thumb_html(url, size_class="thumb"):
-    if url:
-        return f'<img src="{html.escape(url)}" class="{size_class}" alt="">'
-    return f'<div class="{size_class} thumb-empty"></div>'
-
-
-def _mod_status_tag(r):
-    note_attr = f' title="{html.escape(r["note"])}"' if r["note"] else ""
-    if r["update_available"]:
-        return '<span class="tag warn">Update available</span>'
-    if r["live_ts"] is None:
-        return f'<span class="tag muted"{note_attr}>Lookup failed</span>'
-    if r["installed_ts"] is None:
-        return f'<span class="tag info"{note_attr}>Not installed</span>'
-    if r["note"]:
-        return f'<span class="tag muted"{note_attr}>Flagged</span>'
-    return '<span class="tag ok">Current</span>'
-
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 def status_page():
@@ -769,7 +157,7 @@ def status_page():
     if save_dir is not None:
         save_dir_name = save_dir.name
         danger_zone_html = f"""
-            <div class="hazard-frame danger" style="margin:2rem -1.75rem 0;width:calc(100% + 3.5rem);">
+            <div class="hazard-frame danger" style="margin:2rem -1.75rem -1.75rem;width:calc(100% + 3.5rem);">
                 <div class="hazard-frame-inner">
                     <p class="eyebrow" style="color:var(--rust);letter-spacing:.1em;">Danger Zone</p>
                     <p class="note" style="border-top:none;margin-top:0;padding-top:.5rem;">
@@ -891,7 +279,7 @@ def status_page():
         function refreshStatus(){{fetch('/api/status-full').then(function(r){{return r.json();}}).then(function(data){{var ledColours={{online:'var(--signal)',starting:'var(--amber)',failed:'var(--rust)'}};var led=document.getElementById('status-led');var colour=ledColours[data.state]||'var(--ink-dim)';led.style.setProperty('--led-colour',colour);led.classList.toggle('pulse',!!ledColours[data.state]);document.getElementById('status-label').textContent=data.state.toUpperCase();document.getElementById('status-unit').textContent=data.unit+'.service';var isRunning=(data.state==='online'||data.state==='starting');document.getElementById('btn-start').className='btn'+(!isRunning?' primary':'');document.getElementById('btn-stop').className='btn'+(isRunning?' danger':'');document.getElementById('btn-restart').className='btn'+(data.state==='online'?' info':'');var wdForm=document.getElementById('watchdog-form');var wdBtn=document.getElementById('watchdog-btn');var wdTagParent=document.getElementById('watchdog-tag').parentNode;if(data.watchdog_paused){{wdTagParent.querySelector('#watchdog-tag').outerHTML='<span class="tag warn" id="watchdog-tag">Watchdog paused</span>';wdForm.action='/automation/resume';wdBtn.textContent='Resume Watchdog';wdBtn.className='btn primary';}}else{{wdTagParent.querySelector('#watchdog-tag').outerHTML='<span class="tag ok" id="watchdog-tag">Watchdog active</span>';wdForm.action='/automation/pause';wdBtn.textContent='Pause Watchdog';wdBtn.className='btn danger';}}var cdBlock=document.getElementById('countdown-block');if(data.countdown){{cdBlock.style.display='';document.getElementById('countdown-label').textContent=data.countdown.paused?('Countdown paused at '+data.countdown.remaining_display):('Restarting in '+data.countdown.remaining_display);document.getElementById('countdown-mods').textContent=data.countdown.mods;document.getElementById('countdown-led').style.setProperty('--led-colour',data.countdown.paused?'var(--amber)':'var(--rust)');var pForm=document.getElementById('countdown-pause-form');var pBtn=document.getElementById('countdown-pause-btn');if(data.countdown.paused){{pForm.action='/countdown/resume';pBtn.textContent='Resume';pBtn.className='btn primary';}}else{{pForm.action='/countdown/pause';pBtn.textContent='Pause';pBtn.className='btn';}}var pausedDisplay=data.countdown.paused?'':'none';document.getElementById('countdown-cancel-form').style.display=pausedDisplay;document.getElementById('countdown-checkmods-btn').style.display=pausedDisplay;}}else{{cdBlock.style.display='none';}}var pdBlock=document.getElementById('postponed-block');if(data.postponed){{pdBlock.style.display='';document.getElementById('postponed-label').textContent='Restart scheduled for '+data.postponed.label;document.getElementById('postponed-mods').textContent=data.postponed.mods;}}else{{pdBlock.style.display='none';}}}}).catch(function(err){{console.error('status refresh failed',err);}});}}
         setInterval(refreshStatus,3000);
         </script>"""
-    return page_shell("PZ Panel", "status", body)
+    return _page("PZ Panel", "status", body)
 
 
 @app.get("/api/status-full")
@@ -1166,7 +554,7 @@ def mods_page(request: Request):
         </script>"""
 
     body = f"{banner_html}{list_html}{add_mod_html}{removed_html}{modal_html}{reorder_script}"
-    return page_shell("PZ Panel &mdash; Mods", "mods", body)
+    return _page("PZ Panel &mdash; Mods", "mods", body)
 
 
 @app.get("/api/mods")
@@ -1228,7 +616,7 @@ def add_mod_page(request: Request, lookup: str = ""):
         {preview_html}
         <p class="note"><a class="link" href="/mods">&larr; Back to manifest</a></p>
     """
-    return page_shell("PZ Panel &mdash; Add Mod", "mods", body)
+    return _page("PZ Panel &mdash; Add Mod", "mods", body)
 
 
 @app.post("/mods/add/confirm")
@@ -1404,29 +792,22 @@ def log_page():
             {"".join(rows)}
         </table>
         <p class="note">Showing the last {len(entries)} {action_word}.</p>"""
-    return page_shell("PZ Panel &mdash; Log", "log", body_inner)
+    return _page("PZ Panel &mdash; Log", "log", body_inner)
 
 
 @app.get("/killboard", response_class=HTMLResponse)
 def killboard_page():
     if _player_event_watcher is None:
         body = '<p class="note">Player-event tracking isn\'t running -- check that pzpanel.ini was readable at startup.</p>'
-        return page_shell("PZ Panel &mdash; Killboard", "killboard", body)
+        return _page("PZ Panel &mdash; Killboard", "killboard", body)
     db = _player_event_watcher.db
     if db is not None:
         accounts = db.get_killboard()
         if not accounts:
-            table_html = """<div style="display:flex;align-items:flex-start;gap:1.25rem;margin-bottom:1rem;">
-                <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885" target="_blank" rel="noopener noreferrer" style="flex-shrink:0;">
-                    <img src="https://steamuserimages-a.akamaihd.net/ugc/placeholder/3793020885/" width="72" height="72"
-                         style="border-radius:2px;border:1px solid var(--line);display:block;background:#1a2016;"
-                         onerror="this.src='https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/108600/header.jpg';this.style.height='auto';" alt="PZP mod">
-                </a>
-                <p class="note" style="border-top:none;margin-top:0;padding-top:0;">No player data yet \u2014 waiting for the first connection to be recorded.<br>
-                Make sure the <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885" class="link" target="_blank" rel="noopener noreferrer">PZP Lua mod (Workshop ID 3793020885)</a> is installed and <code>kills_file</code> is configured in Settings.</p>
-            </div>"""
+            table_html = '<p class="note">No player data yet -- waiting for the first connection to be recorded.</p>'
         else:
-            account_blocks = []
+            # Players table
+            player_rows = []
             for acc in accounts:
                 steamid = acc["steamid"]
                 steam_name = html.escape(acc["steam_name"] or steamid)
@@ -1437,56 +818,85 @@ def killboard_page():
                                    f'class="thumb" style="vertical-align:middle;margin-right:.5rem;" alt="">')
                 hours_note = ""
                 if acc.get("pz_hours") is not None:
-                    hours_note = f'<span class="readout-sub" style="margin-left:.5rem;">{acc["pz_hours"]:,} hrs in PZ</span>'
-                char_rows = []
+                    hours_note = f'<span class="readout-sub" style="margin-left:.5rem;font-size:.72rem;">{acc["pz_hours"]:,} hrs in PZ</span>'
+                player_rows.append(f"""<tr>
+                    <td>{avatar_html}<a href="{html.escape(profile_url, quote=True)}"
+                        target="_blank" rel="noopener noreferrer"
+                        class="link-id" style="font-size:1rem;">{steam_name}</a>{hours_note}</td>
+                    <td class="mono">{acc['account_kills']}</td>
+                </tr>""")
+            players_table = f"""<p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Players</p>
+                <table>
+                    <tr><th>Player</th><th>Total kills</th></tr>
+                    {"".join(player_rows)}
+                </table>"""
+            # Characters table
+            char_rows = []
+            for acc in accounts:
                 for c in acc["characters"]:
                     run_str = str(c["current_run_kills"]) if c["current_run_kills"] else "\u2014"
                     char_rows.append(f"""<tr>
-                        <td style="padding-left:2rem;">{html.escape(c['username'])}</td>
+                        <td>{html.escape(c['username'])}</td>
                         <td class="mono">{run_str}</td>
-                        <td class="mono">{c['char_kills']}</td>
+                        <td class="mono">\u2014</td>
                     </tr>""")
-                account_blocks.append(f"""
-                    <tr style="background:rgba(255,176,32,.04);">
-                        <td colspan="3" style="padding:.7rem;">
-                            {avatar_html}<a href="{html.escape(profile_url, quote=True)}"
-                            target="_blank" rel="noopener noreferrer"
-                            class="link-id" style="font-size:1rem;">{steam_name}</a>
-                            {hours_note}
-                            <span class="tag ok" style="margin-left:.75rem;">{acc['account_kills']} lifetime</span>
-                        </td>
-                    </tr>
+            chars_table = f"""<p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Characters</p>
+                <table>
+                    <tr><th>Character</th><th>Kills (current run)</th><th>Time survived (in-game)</th></tr>
                     {"".join(char_rows)}
-                """)
-            table_html = f"""<table>
-                <tr><th>Player / Character</th><th>Kills (current run)</th><th>Kills (lifetime)</th></tr>
-                {"".join(account_blocks)}
-            </table>"""
+                </table>"""
+            table_html = players_table + chars_table
         body = f"""
             {table_html}
-            <p class="note">Grouped by Steam account. Lifetime kills accumulate across all characters
-            and runs tracked by PZP. The mod file is rewritten roughly every 60 seconds so live
-            kill counts can lag by up to that long.</p>
+            <p class="note">Lifetime kills accumulate across all characters and runs tracked by PZP.
+            The mod file is rewritten roughly every 60 seconds so live kill counts can lag by up to that long.</p>
         """
-        return page_shell("PZ Panel &mdash; Killboard", "killboard", body)
+        return _page("PZ Panel &mdash; Killboard", "killboard", body)
     if _player_event_watcher.kills_file is None:
         body = '<p class="note">No kills_file configured under <code>[player_events]</code> in pzpanel.ini.</p>'
-        return page_shell("PZ Panel &mdash; Killboard", "killboard", body)
+        return _page("PZ Panel &mdash; Killboard", "killboard", body)
     st = _player_event_watcher.state.data
     current = st.get("kills_current_run", {})
     lifetime = st.get("kills_lifetime", {})
+    hours = st.get("hours_current_run", {})
+    logins = st.get("logins", {})  # username -> steamid
     last_updated = st.get("kills_last_updated")
     names = sorted(set(current) | set(lifetime), key=lambda n: current.get(n, 0), reverse=True)
     if not names:
         table_html = '<p class="note">No kill data yet.</p>'
     else:
-        rows = []
+        # Players section: group lifetime kills by steamid where known, else by username
+        seen_steamids = {}
+        player_totals = {}  # display_key -> {name, total}
         for n in names:
-            rows.append(f"""<tr><td>{html.escape(n)}</td><td class="mono">{current.get(n, '\u2014')}</td><td class="mono">{lifetime.get(n, 0)}</td></tr>""")
-        table_html = f"""<table><tr><th>Player</th><th>Kills (current run)</th><th>Kills (lifetime)</th></tr>{"".join(rows)}</table>"""
+            sid = logins.get(n)
+            key = sid or n
+            if key not in player_totals:
+                player_totals[key] = {"name": n, "total": 0}
+            player_totals[key]["total"] += lifetime.get(n, 0)
+        player_rows = []
+        for key, p in sorted(player_totals.items(), key=lambda x: x[1]["total"], reverse=True):
+            player_rows.append(f"""<tr><td>{html.escape(p['name'])}</td><td class="mono">{p['total']}</td></tr>""")
+        players_table = f"""<p class="eyebrow" style="margin:0 0 .6rem;letter-spacing:.06em;">Players</p>
+            <table>
+                <tr><th>Player</th><th>Total kills</th></tr>
+                {"".join(player_rows)}
+            </table>"""
+        # Characters section
+        char_rows = []
+        for n in names:
+            ingame = _fmt_ingame_time(hours.get(n))
+            time_cell = html.escape(ingame) if ingame else "\u2014"
+            char_rows.append(f"""<tr><td>{html.escape(n)}</td><td class="mono">{current.get(n, '\u2014')}</td><td class="mono">{time_cell}</td></tr>""")
+        chars_table = f"""<p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Characters</p>
+            <table>
+                <tr><th>Character</th><th>Kills (current run)</th><th>Time survived (in-game)</th></tr>
+                {"".join(char_rows)}
+            </table>"""
+        table_html = players_table + chars_table
     updated_note = f'Last updated {_fmt_ts(last_updated)}.' if last_updated else 'Not yet updated.'
     body = f"{table_html}<p class=\"note\">(In-memory fallback.) {updated_note}</p>"
-    return page_shell("PZ Panel &mdash; Killboard", "killboard", body)
+    return _page("PZ Panel &mdash; Killboard", "killboard", body)
 
 
 async def _tail_file_events(path, request=None, poll_interval=0.5, initial_lines=200):
@@ -1547,7 +957,7 @@ def console_page():
             var output=document.getElementById('console-output'),statusEl=document.getElementById('stream-status'),filterEl=document.getElementById('filter-input'),pauseBtn=document.getElementById('pause-btn'),atBottom=true;
             output.addEventListener('scroll',function(){{atBottom=(output.scrollHeight-output.scrollTop-output.clientHeight)<40;}});
             function escapeHtml(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-            function colorizeLine(line){{var escaped=escapeHtml(line);var m=line.match(/^(ERROR|WARN|LOG)/);if(!m)return escaped;var level=m[1];var cls=level==='ERROR'?'lvl-error':level==='WARN'?'lvl-warn':'lvl-log';var idx=escaped.indexOf(level);if(idx===-1)return escaped;return escaped.slice(0,idx)+'<span class="'+cls+'">'+level+'</span>'+escaped.slice(idx+level.length);}}
+            function colorizeLine(line){{var escaped=escapeHtml(line);if(escaped.indexOf('*** SERVER STARTED')!==-1){{return '<span class="lvl-server-started">'+escaped+'</span>';}}if(/Steam client \\d+ is initiating a connection/.test(line)){{return '<span class="lvl-steam-connect">'+escaped+'</span>';}}var m=line.match(/^(ERROR|WARN|LOG)/);if(!m)return escaped;var level=m[1];var cls=level==='ERROR'?'lvl-error':level==='WARN'?'lvl-warn':'lvl-log';var idx=escaped.indexOf(level);if(idx===-1)return escaped;return escaped.slice(0,idx)+'<span class="'+cls+'">'+level+'</span>'+escaped.slice(idx+level.length);}}
             function appendLine(line){{var div=document.createElement('div');div.innerHTML=colorizeLine(line);output.appendChild(div);while(output.childElementCount>MAX_LINES){{output.removeChild(output.firstChild);}}if(atBottom)output.scrollTop=output.scrollHeight;}}
             var source=new EventSource('/console/stream');
             source.onmessage=function(e){{buffer.push(e.data);if(buffer.length>MAX_LINES)buffer.shift();if(paused)return;var filter=filterEl.value.toLowerCase();if(!filter||e.data.toLowerCase().indexOf(filter)!==-1){{appendLine(e.data);}}}}
@@ -1558,7 +968,7 @@ def console_page():
         }})();
         </script>
     """
-    return page_shell("PZ Panel &mdash; Console", "console", body)
+    return _page("PZ Panel &mdash; Console", "console", body)
 
 
 @app.get("/console/stream")
@@ -1604,7 +1014,6 @@ def settings_page(request: Request):
         current_val = current.get(sec, {}).get(key, "")
         field_name = f"{sec}__{key}"
         os_attr = f' data-os="{field["os"]}"' if field.get("os") else ""
-
         if field.get("sensitive"):
             is_set = bool(current_val) and current_val != "CHANGEME"
             placeholder = "Click to change" if is_set else "Not set"
@@ -1615,9 +1024,7 @@ def settings_page(request: Request):
             input_html = f'<input type="checkbox" name="{html.escape(field_name)}" value="true" {checked}>'
         else:
             input_html = (f'<input type="text" name="{html.escape(field_name)}" class="input" '
-                          f'value="{html.escape(current_val)}">'
-                          )
-
+                          f'value="{html.escape(current_val)}">')
         assist = field.get("assist")
         assist_html = ""
         if assist in ("find-ini", "find-acf"):
@@ -1634,7 +1041,6 @@ def settings_page(request: Request):
         elif assist == "derive-save-dir":
             assist_html = (f'<button type="button" class="btn" style="margin-top:.4rem;" '
                            f'onclick="pzpDeriveSaveDir(\'{field_name}\')">Derive from .ini</button>')
-
         help_html = (f'<p class="note" style="margin-top:.3rem;padding-top:0;border-top:none;">'
                      f'{html.escape(field["help"])}</p>' if field.get("help") else "")
         return f"""
@@ -1655,7 +1061,7 @@ def settings_page(request: Request):
         collapsed_style = "display:none;" if grp.get("collapsed") else ""
         grp_help = (f'<p class="cfg-help" style="margin-bottom:.75rem;">{html.escape(grp["help"])}</p>'
                     if grp.get("help") else "")
-
+        preview_block = grp.get("preview_html", "")
         os_toggle_html = ""
         if grp.get("os_toggle"):
             os_toggle_html = """
@@ -1664,13 +1070,13 @@ def settings_page(request: Request):
                     <button type="button" class="btn" id="os-toggle-btn" onclick="settingsToggleOS(this)">Linux</button>
                 </div>
             """
-
         fields_html = "".join(_field_html(f) for f in grp["fields"])
         sections_html += f"""
             <div class="cfg-section">
                 <p class="cfg-section-title{collapsed_cls}" onclick="cfgToggleSection(this)">{html.escape(grp['group'])}<span class="cfg-chevron">&#9660;</span></p>
                 <div class="cfg-section-body" style="{collapsed_style}">
                     {grp_help}
+                    {preview_block}
                     {os_toggle_html}
                     {fields_html}
                 </div>
@@ -1681,14 +1087,16 @@ def settings_page(request: Request):
         {banner_html}
         <form method="post" action="/settings" id="settings-form">
             {sections_html}
-            <div class="actions" style="margin-top:.5rem;padding-top:1.25rem;border-top:1px solid var(--line);justify-content:flex-end;">
-                <button type="submit" class="btn primary" id="settings-save-btn" disabled>Save Settings</button>
-            </div>
         </form>
+        <div class="cfg-save-bar" id="settings-save-bar">
+            <button type="button" class="btn" onclick="location.reload()">Discard</button>
+            <button type="button" class="btn primary" onclick="document.getElementById('settings-form').submit()">Save Settings</button>
+        </div>
         <script>
         (function(){{
-            var form=document.getElementById('settings-form'),saveBtn=document.getElementById('settings-save-btn');
-            function markDirty(){{saveBtn.disabled=false;}}
+            var form=document.getElementById('settings-form');
+            var bar=document.getElementById('settings-save-bar');
+            function markDirty(){{bar.classList.add('visible');}}
             form.addEventListener('input',markDirty);form.addEventListener('change',markDirty);
         }})();
         function cfgToggleSection(titleEl){{var body=titleEl.nextElementSibling;var collapsed=titleEl.classList.toggle('collapsed');body.style.display=collapsed?'none':'';}}
@@ -1709,7 +1117,7 @@ def settings_page(request: Request):
         function pzpDeriveSaveDir(fieldName){{var iniInput=document.querySelector('input[name="paths__server_ini"]');var parsed=pzpIniParts(iniInput.value||'');if(!parsed||parsed.dirParts.length<1){{alert('Fill in the World Config (.ini) Path above first.');return;}}var upTwo=parsed.dirParts.slice(0,-1);var target='/'+upTwo.concat(['Saves','Multiplayer',parsed.stem]).join('/');var input=document.querySelector('input[name="'+fieldName+'"]');input.value=target;input.dispatchEvent(new Event('input',{{bubbles:true}}));}}
         </script>
     """
-    return page_shell("PZ Panel &mdash; Settings", "settings", body)
+    return _page("PZ Panel &mdash; Settings", "settings", body)
 
 
 @app.post("/settings")
@@ -1754,185 +1162,6 @@ async def settings_save(request: Request):
     return RedirectResponse(f"/settings?{qs}", status_code=303)
 
 
-# =============================================================================
-# Config page -- edits server .ini via the UI
-# =============================================================================
-
-_REALM_GROUPS = [
-    {"group": "Players & Access", "fields": [
-        {"key": "Open", "label": "Open to Public", "type": "toggle"},
-        {"key": "Password", "label": "Server Password", "type": "password"},
-        {"key": "MaxPlayers", "label": "Max Players", "type": "range", "min": 1, "max": 100, "default": 32},
-        {"key": "MaxAccountsPerUser", "label": "Max Characters per Steam Account", "type": "range", "min": 1, "max": 32, "default": 1},
-        {"key": "AllowCoop", "label": "Allow Split-Screen Co-op", "type": "toggle"},
-        {"key": "PingLimit", "label": "Ping Limit (ms, 0=off)", "type": "range", "min": 0, "max": 1000, "default": 400},
-        {"key": "LoginQueueEnabled", "label": "Login Queue", "type": "toggle", "master_for": "LoginQueue"},
-        {"key": "LoginQueueConnectTimeout", "label": "Queue Timeout (sec)", "type": "range", "min": 20, "max": 1200, "default": 60, "group_key": "LoginQueue"},
-        {"key": "AllowNonAsciiUsername", "label": "Allow Non-ASCII Usernames", "type": "toggle"},
-    ]},
-    {"group": "PVP", "fields": [
-        {"key": "PVP", "label": "PVP Enabled", "type": "toggle", "master_for": "PVP"},
-        {"key": "SafetySystem", "label": "Safety System", "type": "toggle", "group_key": "PVP", "master_for": "Safety"},
-        {"key": "ShowSafety", "label": "Show Safety Status", "type": "toggle", "group_key": "Safety"},
-        {"key": "SafetyToggleTimer", "label": "Safety Toggle Timer (min)", "type": "range", "min": 0, "max": 1440, "default": 2, "group_key": "Safety"},
-        {"key": "SafetyCooldownTimer", "label": "Safety Cooldown Timer (min)", "type": "range", "min": 0, "max": 1440, "default": 3, "group_key": "Safety"},
-        {"key": "PVPMeleeDamageModifier", "label": "PVP Melee Damage Modifier (%)", "type": "range", "min": 0, "max": 500, "default": 30, "group_key": "PVP"},
-        {"key": "PVPFirearmDamageModifier", "label": "PVP Firearm Damage Modifier (%)", "type": "range", "min": 0, "max": 500, "default": 50, "group_key": "PVP"},
-        {"key": "PVPMeleeWhileHitReaction", "label": "PVP Melee While Staggered", "type": "toggle", "group_key": "PVP"},
-    ]},
-    {"group": "World & Gameplay", "fields": [
-        {"key": "PauseEmpty", "label": "Pause When Empty", "type": "toggle"},
-        {"key": "NoFire", "label": "Disable Fire Spread", "type": "toggle"},
-        {"key": "SaveWorldEveryMinutes", "label": "Save World Every (minutes)", "type": "range", "min": 0, "max": 1440, "default": 0},
-        {"key": "BloodSplatLifespanDays", "label": "Blood Splat Lifespan (days, 0=forever)", "type": "range", "min": 0, "max": 365, "default": 0},
-        {"key": "AllowDestructionBySledgehammer", "label": "Allow Sledgehammer Destruction", "type": "toggle"},
-        {"key": "SledgehammerOnlyInSafehouse", "label": "Sledgehammer Only in Safehouse", "type": "toggle"},
-        {"key": "SpeedLimit", "label": "Vehicle Speed Limit (kph)", "type": "range", "min": 10, "max": 150, "default": 70},
-        {"key": "CarEngineAttractionModifier", "label": "Vehicle Engine Noise Modifier", "type": "range", "min": 0, "max": 10, "default": 1},
-        {"key": "TrashDeleteAll", "label": "Bin Deletes All Items", "type": "toggle"},
-        {"key": "UsePhysicsHitReaction", "label": "Physics Hit Reactions", "type": "toggle"},
-    ]},
-    {"group": "Vehicles & Towing", "fields": [
-        {"key": "DisableVehicleTowing", "label": "Allow Vehicle Towing", "type": "toggle", "inverted": True},
-        {"key": "DisableTrailerTowing", "label": "Allow Trailer Towing", "type": "toggle", "inverted": True},
-        {"key": "DisableBurntTowing", "label": "Allow Burnt Vehicle Towing", "type": "toggle", "inverted": True},
-    ]},
-    {"group": "Players on Map", "fields": [
-        {"key": "MapRemotePlayerVisibility", "label": "Remote Player Map Visibility", "type": "range", "min": 1, "max": 3, "default": 1, "help": "1=Friends, 2=Friends of friends, 3=Everyone"},
-        {"key": "SteamScoreboard", "label": "Steam Scoreboard", "type": "range", "min": 0, "max": 2, "default": 1, "help": "0=Off, 1=Friends, 2=Everyone"},
-        {"key": "ShowCoordinates", "label": "Show Coordinates", "type": "toggle"},
-        {"key": "DisplayUserName", "label": "Display Username Above Head", "type": "toggle"},
-        {"key": "ShowFirstAndLastName", "label": "Show First and Last Name", "type": "toggle"},
-        {"key": "MouseOverToSeeDisplayName", "label": "Mouse-Over to See Name", "type": "toggle"},
-        {"key": "HidePlayersBehindYou", "label": "Hide Players Behind You", "type": "toggle"},
-        {"key": "UsernameDisguises", "label": "Username Disguises", "type": "toggle"},
-        {"key": "HideDisguisedUserName", "label": "Hide Disguised Usernames", "type": "toggle"},
-        {"key": "SneakModeHideFromOtherPlayers", "label": "Sneaking Hides from Other Players", "type": "toggle"},
-    ]},
-    {"group": "Chat", "fields": [
-        {"key": "GlobalChat", "label": "Global Chat", "type": "toggle", "master_for": "Chat"},
-        {"key": "ChatStreams", "label": "Chat Channels", "type": "checkboxes", "group_key": "Chat",
-         "options": [("s", "Say"), ("r", "Radio"), ("a", "Admin"), ("w", "Whisper"), ("y", "Yell"), ("sh", "Shout"), ("f", "Faction"), ("all", "All")]},
-        {"key": "AnnounceDeath", "label": "Announce Player Deaths", "type": "toggle"},
-        {"key": "AnnounceAnimalDeath", "label": "Announce Animal Deaths", "type": "toggle"},
-        {"key": "BanKickGlobalSound", "label": "Global Sound on Ban/Kick", "type": "toggle"},
-        {"key": "ChatMessageCharacterLimit", "label": "Chat Message Character Limit", "type": "range", "min": 64, "max": 2000, "default": 200, "group_key": "Chat"},
-        {"key": "ChatMessageSlowModeTime", "label": "Chat Slow Mode (sec, 0=off)", "type": "range", "min": 0, "max": 60, "default": 0, "group_key": "Chat"},
-    ]},
-    {"group": "Safehouses", "fields": [
-        {"key": "PlayerSafehouse", "label": "Player Safehouses", "type": "toggle", "master_for": "Safehouse"},
-        {"key": "AdminSafehouse", "label": "Admin Safehouses", "type": "toggle"},
-        {"key": "SafehouseAllowTrespass", "label": "Allow Safehouse Trespass", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "SafehouseAllowFire", "label": "Allow Fire in Safehouse", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "SafehouseAllowLoot", "label": "Allow Safehouse Looting", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "SafehouseAllowRespawn", "label": "Allow Respawn in Safehouse", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "SafehouseDaySurvivedToClaim", "label": "Days Survived to Claim Safehouse", "type": "range", "min": 0, "max": 365, "default": 0, "group_key": "Safehouse"},
-        {"key": "SafeHouseRemovalTime", "label": "Safehouse Removal Time (hours)", "type": "range", "min": 0, "max": 8760, "default": 144, "group_key": "Safehouse"},
-        {"key": "SafehouseAllowNonResidential", "label": "Allow Non-Residential Safehouses", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "DisableSafehouseWhenOwnerConnected", "label": "Disable Safehouse When Owner Online", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "MaxSafezoneSize", "label": "Max Safezone Size", "type": "range", "min": 1, "max": 10, "default": 3, "group_key": "Safehouse"},
-        {"key": "SafehouseDisableDisguises", "label": "Disguises Disabled in Safehouse", "type": "toggle", "group_key": "Safehouse"},
-        {"key": "SafehousePreventsLootRespawn", "label": "Safehouse Prevents Loot Respawn", "type": "toggle", "group_key": "Safehouse"},
-    ]},
-    {"group": "Factions", "fields": [
-        {"key": "Faction", "label": "Factions Enabled", "type": "toggle", "master_for": "Faction"},
-        {"key": "FactionDaySurvivedToCreate", "label": "Days Survived to Create Faction", "type": "range", "min": 0, "max": 365, "default": 1, "group_key": "Faction"},
-        {"key": "FactionPlayersRequiredForTag", "label": "Players Required for Faction Tag", "type": "range", "min": 1, "max": 64, "default": 1, "group_key": "Faction"},
-    ]},
-    {"group": "War", "fields": [
-        {"key": "War", "label": "War Mode Enabled", "type": "toggle", "master_for": "War"},
-        {"key": "WarStartDelay", "label": "War Start Delay (hours)", "type": "range", "min": 0, "max": 720, "default": 24, "group_key": "War"},
-        {"key": "WarDuration", "label": "War Duration (hours)", "type": "range", "min": 1, "max": 720, "default": 24, "group_key": "War"},
-        {"key": "WarSafehouseHitPoints", "label": "Safehouse Hit Points During War", "type": "range", "min": 100, "max": 10000, "default": 2000, "group_key": "War"},
-    ]},
-    {"group": "Respawn", "fields": [
-        {"key": "PlayerRespawnWithSelf", "label": "Respawn With Self", "type": "toggle"},
-        {"key": "PlayerRespawnWithOther", "label": "Respawn With Other Players", "type": "toggle"},
-        {"key": "DropOffWhiteListAfterDeath", "label": "Remove Whitelist on Death", "type": "toggle"},
-        {"key": "SpawnPoint", "label": "Spawn Point (x,y,z or blank=random)", "type": "text"},
-    ]},
-    {"group": "Sleep & Time", "fields": [
-        {"key": "SleepAllowed", "label": "Sleep Allowed", "type": "toggle", "master_for": "Sleep"},
-        {"key": "SleepNeeded", "label": "Sleep Required", "type": "toggle", "group_key": "Sleep"},
-        {"key": "FastForwardMultiplier", "label": "Sleep Fast-Forward Speed", "type": "range", "min": 1, "max": 100, "default": 40, "group_key": "Sleep"},
-    ]},
-    {"group": "Voice (VOIP)", "fields": [
-        {"key": "VoiceEnable", "label": "VOIP Enabled", "type": "toggle", "master_for": "VOIP"},
-        {"key": "VoiceMinDistance", "label": "Min Voice Distance", "type": "range", "min": 0, "max": 100, "default": 10, "group_key": "VOIP"},
-        {"key": "VoiceMaxDistance", "label": "Max Voice Distance", "type": "range", "min": 0, "max": 100, "default": 100, "group_key": "VOIP"},
-        {"key": "Voice3D", "label": "3D Voice", "type": "toggle", "group_key": "VOIP"},
-    ]},
-    {"group": "Networking", "fields": [
-        {"key": "DefaultPort", "label": "Game Port", "type": "range", "min": 1024, "max": 65535, "default": 16261},
-        {"key": "UDPPort", "label": "UDP Port", "type": "range", "min": 1024, "max": 65535, "default": 16262},
-        {"key": "UPnP", "label": "UPnP", "type": "toggle"},
-        {"key": "DenyLoginOnOverloadedServer", "label": "Deny Login When Overloaded", "type": "toggle"},
-        {"key": "SteamVAC", "label": "Steam VAC", "type": "toggle"},
-        {"key": "MaxPacketsPerSecond", "label": "Max Packets per Second", "type": "range", "min": 1, "max": 100, "default": 60},
-        {"key": "MultiplayerStatisticsPeriod", "label": "Statistics Period", "type": "range", "min": 5, "max": 3600, "default": 30},
-    ]},
-    {"group": "Radio Restrictions", "fields": [
-        {"key": "DisableRadioStaff", "label": "Staff Can Use Radio", "type": "toggle", "inverted": True},
-        {"key": "DisableRadioAdmin", "label": "Admins Can Use Radio", "type": "toggle", "inverted": True},
-        {"key": "DisableRadioGM", "label": "GMs Can Use Radio", "type": "toggle", "inverted": True},
-        {"key": "DisableRadioOverseer", "label": "Overseers Can Use Radio", "type": "toggle", "inverted": True},
-        {"key": "DisableRadioModerator", "label": "Moderators Can Use Radio", "type": "toggle", "inverted": True},
-        {"key": "DisableRadioInvisible", "label": "Invisible Admins Can Use Radio", "type": "toggle", "inverted": True},
-    ]},
-    {"group": "Public Info", "fields": [
-        {"key": "Public", "label": "Listed on Public Browser", "type": "toggle"},
-        {"key": "PublicName", "label": "Public Server Name", "type": "text"},
-        {"key": "PublicDescription", "label": "Public Description", "type": "text"},
-        {"key": "HideAdminsInPlayerList", "label": "Hide Admins in Player List", "type": "toggle"},
-        {"key": "DisableScoreboard", "label": "Disable Scoreboard", "type": "toggle"},
-        {"key": "PerkLogs", "label": "Perk Logs", "type": "toggle"},
-        {"key": "ItemNumbersLimitPerContainer", "label": "Item Limit per Container", "type": "range", "min": 0, "max": 9000, "default": 0},
-        {"key": "DoLuaChecksum", "label": "Lua Checksum Verification", "type": "toggle", "help": "Disable if using mods that modify client-side Lua."},
-    ]},
-    {"group": "Anti-Cheat Severity", "fields": [
-        {"key": "AntiCheatProtectionType1", "label": "Protection Type 1", "type": "range", "min": 1, "max": 4, "default": 2},
-        {"key": "AntiCheatProtectionType2", "label": "Protection Type 2", "type": "range", "min": 1, "max": 4, "default": 4},
-        {"key": "AntiCheatProtectionType3", "label": "Protection Type 3", "type": "range", "min": 1, "max": 4, "default": 2},
-        {"key": "AntiCheatProtectionType4", "label": "Protection Type 4", "type": "range", "min": 1, "max": 4, "default": 4},
-        {"key": "AntiCheatProtectionType5", "label": "Protection Type 5", "type": "range", "min": 1, "max": 4, "default": 4},
-        {"key": "AntiCheatProtectionType6", "label": "Protection Type 6", "type": "range", "min": 1, "max": 4, "default": 4},
-        {"key": "AntiCheatProtectionType7", "label": "Protection Type 7", "type": "range", "min": 1, "max": 4, "default": 4},
-        {"key": "AntiCheatProtectionType8", "label": "Protection Type 8", "type": "range", "min": 1, "max": 4, "default": 4},
-    ]},
-    {"group": "Server Backups", "fields": [
-        {"key": "BackupsOnStart", "label": "Backup on Server Start", "type": "toggle"},
-        {"key": "BackupsOnVersionChange", "label": "Backup on Version Change", "type": "toggle"},
-        {"key": "BackupsCount", "label": "Max Backups to Keep", "type": "range", "min": 1, "max": 300, "default": 5},
-        {"key": "BackupsPeriod", "label": "Backup Period (minutes, 0=off)", "type": "range", "min": 0, "max": 10080, "default": 0},
-    ]},
-]
-
-
-def _read_realm_ini(path):
-    result = {}
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                result[k.strip()] = v.strip()
-    except OSError:
-        pass
-    return result
-
-
-def _bool_val(raw, inverted=False):
-    b = raw.strip().lower() in ("true", "1", "yes")
-    return (not b) if inverted else b
-
-
-def _ini_bool(display_on, inverted=False):
-    actual_on = (not display_on) if inverted else display_on
-    return "true" if actual_on else "false"
-
-
 @app.get("/config", response_class=HTMLResponse)
 def config_page(request: Request):
     msg = request.query_params.get("msg")
@@ -1946,14 +1175,14 @@ def config_page(request: Request):
             <a href="/settings" class="link">Settings page</a> under
             <code>World Config (.ini) Path</code> to enable the Config page.</p>
         """
-        return page_shell("PZ Panel &mdash; Config", "config", body)
+        return _page("PZ Panel &mdash; Config", "config", body)
     if not Path(ini_path).exists():
         body = f"""
             {banner_html}
             <p class="note" style="color:var(--rust);">Configured path <code>{html.escape(ini_path)}</code>
             does not exist. Check the path in the <a href="/settings" class="link">Settings page</a>.</p>
         """
-        return page_shell("PZ Panel &mdash; Config", "config", body)
+        return _page("PZ Panel &mdash; Config", "config", body)
     ini = _read_realm_ini(ini_path)
     masters = {}
     for grp in _REALM_GROUPS:
@@ -2112,7 +1341,7 @@ def config_page(request: Request):
         document.addEventListener('keydown',function(e){{if(e.key==='Escape')cfgCloseModal();}});
         </script>
     """
-    return page_shell("PZ Panel &mdash; Config", "config", body)
+    return _page("PZ Panel &mdash; Config", "config", body)
 
 
 @app.post("/config")
@@ -2187,4 +1416,3 @@ async def config_save(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=False)
-

@@ -9,6 +9,175 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [4.2.5] - 2026-09-13
+
+### Fixed
+
+- **Disconnect embed: "Kills this session" always shown**, even when 0.
+  Previously suppressed by `if session_kills_total:` which treated 0 as
+  falsy.
+
+### Changed
+
+- **Join embed: Lifetime kills stacked below Hours on Record** (both
+  `inline: False`) instead of side by side.
+- **Disconnect embed: removed Lifetime kills field.** Shows only
+  "Kills this session" and "Kills this run".
+
+## [4.2.4] - 2026-09-13
+
+### Changed
+
+- **Kills file format changed from pipe-delimited to JSON**, keyed by
+  steamid. New format: `{steamid: {username: {kills, alive, survived},
+  lifetimeKills: N}}`. The server Lua (`pzp_Server.lua`) writes this
+  format; the panel parses it via `KillsFile.poll()`.
+- **Lifetime kills now sourced directly from the kills file** via
+  `lifetimeKills` field (computed server-side as sum of all characters
+  under a steamid). Eliminates the previous double-counting bug where
+  `_roll_kills` on disconnect was adding current-run kills to lifetime
+  every session.
+- **`_roll_kills` no longer called on disconnect** — run is not over
+  at disconnect time; file persists and is re-read next session.
+- **Session kills** = `session_kills` (from deaths this session) +
+  `partial` (current run kills minus start snapshot). Correct across
+  multi-run sessions.
+- **Join embed layout** reworked to match spec:
+  Row 1: Hours on Record | Lifetime kills
+  Row 2: Logging in as | Survived for | Current run kills
+  Recently played: header + two games side by side (inline fields)
+  "Current run" shows "No kills yet" when 0.
+  "Logging in as" always shown.
+- **`pzp_Client.lua`**: now sends `steamID` field with every command.
+- **`pzp_Server.lua`**: rewrites kills file as JSON on every update;
+  includes per-character `alive` flag and `survived` hours; computes
+  `lifetimeKills` as sum of all characters per steamid.
+- **B42 connections log watcher** (`_run_connections` thread): tails
+  the lexicographically highest `*_connections.txt` in
+  `/home/pzserver/Zomboid/Logs/`, resolving join/disconnect/login-queue
+  events that B42 no longer writes to the server console log.
+- **Steam `GetOwnedGames` replaces `GetRecentlyPlayedGames`** for
+  recently played — sorts all owned games by `rtime_last_played`,
+  takes top 2 excluding PZ. Shows total hours and last-played date.
+- **`GetOwnedGames` `appids_filter[0]`** param fixed (was passing a
+  Python list, which `requests` doesn't serialise correctly for the
+  Steam API).
+
+### Fixed
+
+- Join embed "fully-connected" pattern was matching `message=` instead
+  of `event=` — join embeds were never firing.
+- `\d` in JS regex inside Python f-string caused `SyntaxWarning` and
+  broke the console IIFE silently.
+- Steam cache cleared and rebuilt on next join after `appids_filter`
+  fix.
+
+## [4.2.3] - 2026-09-12
+
+### Added
+
+- **Killboard: "Time survived (in-game)" column** on the in-memory
+  fallback view, pulled from `hours_current_run` in watcher state and
+  formatted via `_fmt_ingame_time()` (e.g. "3 days, 2 hours"). Shows
+  `—` when no hours data is available yet for a player.
+
+### Changed
+
+- **`.panel` bottom padding restored to `1.75rem`** (was `0` since
+  v2.18.4). Danger Zone hazard frame on the status page compensates
+  with `margin-bottom:-1.75rem` to stay flush with the panel edge.
+- `_fmt_ingame_time` imported directly from `discord_module` into
+  `main.py` for use in the killboard route.
+
+## [4.2.2] - 2026-09-12
+
+### Fixed
+
+- **Console page blank / JS silent failure after 4.2.1 refactor.**
+  The `colorizeLine` JS string literals used `\'` to escape single
+  quotes inside a Python f-string, which rendered as literal
+  backslash-quote in the HTML -- a JS syntax error that silently killed
+  the entire IIFE, leaving the console box empty and not updating.
+  Fixed by using double quotes inside those JS span string literals,
+  which need no escaping in the Python f-string context.
+- **`\d` in the Steam-connect regex caused a `SyntaxWarning`** (invalid
+  escape sequence in a non-raw Python string). Changed to `\\d` in
+  source so it renders as `\d` in the emitted JS.
+- **Panel stuck in `deactivating` state on `systemctl restart`**
+  caused by an open `/console/stream` SSE connection blocking uvicorn
+  shutdown. Root cause was the `\d` SyntaxWarning above crashing the
+  JS IIFE, which left the browser's `EventSource` open indefinitely.
+  The JS fix above resolves this indirectly.
+- **`discord_module.py`: "Realm is now ONLINE" embed fired on every
+  panel restart**, replaying the last `SERVER STARTED` line from the
+  log file history. Fixed by initialising `last_pos` to
+  `path.stat().st_size` (seek to end) instead of `0` on watcher
+  startup, so only lines written *after* the panel starts are
+  processed.
+
+### Added
+
+- **Console: highlight `*** SERVER STARTED ****` lines** in green
+  (`lvl-server-started` CSS class, full-row background tint).
+- **Console: highlight `Steam client <id> is initiating a connection`
+  lines** in blue (`lvl-steam-connect` CSS class).
+- **`.panel` CSS**: `margin-bottom: 25px` added for visual breathing
+  room below the panel card.
+
+## [4.2.1] - 2026-09-12
+
+### Changed
+
+- **`main.py` split into three files** to reduce its 2,240-line size:
+  - `server_config.py` (new, 627 lines): `CONFIG_PATH`, all config
+    readers, server state/control helpers, INI read/write helpers,
+    `SETTINGS_GROUPS`, `SETTINGS_SCHEMA`, `_REALM_GROUPS`.
+  - `ui_helpers.py` (new, 285 lines): `PAGE_STYLE`, `page_shell()`,
+    `_led_style()`, formatting helpers, mod HTML helpers.
+  - `main.py` reduced to 1,387 lines: app init, startup/shutdown,
+    `_page()` wrapper, all `@app.*` routes.
+  - `page_shell()` now takes a `version=` parameter; `_page()` in
+    `main.py` injects `__version__` automatically.
+
+## [4.2.0] - 2026-09-12
+
+### Fixed
+
+- **Kill tracking: `_roll_kills` on death no longer re-snapshots the
+  kills file as the new session start.** `getZombieKills()` resets to 0
+  on character death, so the file value after death is already 0 --
+  the old `start_snaps[steamid] = raw` caused the next run's kills to
+  be double-subtracted.
+- **`on_server_up` now clears `kills_current_run`, `hours_current_run`,
+  and `milestones_life_fired`** so stale per-character state from the
+  previous session doesn't carry over across server restarts.
+- **`session_kills_start` at join correctly snapshots 0** (not the
+  current file value) since the file resets to 0 on death, making any
+  nonzero file value at join a carry-over artefact.
+
+### Added
+
+- **Discord milestone shout-outs** when a player's kill count crosses
+  configured thresholds:
+  - Per-life: 1, 50, 100, 500, 1000, 5000, 10000 kills. Fires when
+    the kills file crosses the threshold; resets on character death.
+  - Lifetime: same thresholds plus every 10k after (20k, 30k, …).
+    Fires at most once per steamid per threshold, ever.
+  - On first poll after panel restart, thresholds already passed are
+    silently pre-populated to prevent milestone spam.
+- **Survival time tracking.** `pzp_Client.lua` now sends
+  `hoursSurvived` (from `getHoursSurvived()`) in `UpdateKills` and
+  `PlayerDied` events; `pzp_Server.lua` writes it as a third field
+  (`username|kills|hoursSurvived`). Old two-field format still
+  accepted for backward compat.
+- **`player_db.py`**: `sessions.hours_survived REAL` column added,
+  migrated safely via `_migrate()`. `get_killboard()` surfaces
+  `best_hours_survived` per character via `MAX(s.hours_survived)`.
+  `on_join`, `on_disconnect`, `on_death`, `on_server_down` all accept
+  an `hours_survived` kwarg.
+- **Death embeds now include a "Survived (in-game)" field** formatted
+  as "N days, M hours" via `_fmt_ingame_time()`.
+
 ## [2.20.0] - 2026-09-03
 
 ### Changed

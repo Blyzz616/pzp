@@ -1,4 +1,4 @@
-# PZ Panel &nbsp;·&nbsp; v4.1.3
+# PZ Panel &nbsp;·&nbsp; v4.2.5
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
 
@@ -160,6 +160,6 @@ There is currently no built-in authentication - do not do this.
 
 ## Version
 
-**v4.1.3** — ghost death fix, grouped settings page with OS toggle, killboard mod image, screenshots
+**v4.2.5** — disconnect embed always shows session kills; join embed lifetime kills stacked below hours on record
 
 See `CHANGELOG.md` for full history.

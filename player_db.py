@@ -9,9 +9,11 @@ Hierarchy:
 
 Kills aggregate upward: session -> run -> character -> account.
 Stored as (kills_start, kills_end) per session -- the delta is the
-session's contribution, which avoids the in-memory double-count bug
-that _roll_kills() also guards against (two rollover events before the
-mod file's next ~60s write would see the same raw snapshot twice).
+session's contribution, which avoids double-count across reconnects.
+
+hours_survived is the in-game time reported by getHoursSurvived() at
+session close. On disconnect it reflects the last mod update; on death
+it reflects the value sent with the PlayerDied command.
 
 Thread safety: a single threading.Lock guards all write paths. Reads
 are lock-free; SQLite's own WAL mode handles concurrent readers.
@@ -21,7 +23,7 @@ the rest of pzpanel's runtime state). Path is configurable via
 [player_events] player_db in pzpanel.ini.
 """
 
-__version__ = "4.1.0"
+__version__ = "4.2.0"
 
 import logging
 import sqlite3
@@ -60,15 +62,20 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id       INTEGER NOT NULL REFERENCES runs(id),
-    character_id INTEGER NOT NULL REFERENCES characters(id),
-    started_at   REAL NOT NULL,
-    ended_at     REAL,
-    ended_by     TEXT,
-    kills_start  INTEGER NOT NULL DEFAULT 0,
-    kills_end    INTEGER
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER NOT NULL REFERENCES runs(id),
+    character_id    INTEGER NOT NULL REFERENCES characters(id),
+    started_at      REAL NOT NULL,
+    ended_at        REAL,
+    ended_by        TEXT,
+    kills_start     INTEGER NOT NULL DEFAULT 0,
+    kills_end       INTEGER,
+    hours_survived  REAL
 );
+"""
+
+_MIGRATION_HOURS = """
+ALTER TABLE sessions ADD COLUMN hours_survived REAL;
 """
 
 
@@ -77,9 +84,6 @@ class PlayerDB:
     All public methods are thread-safe. Write paths acquire self._lock;
     reads run directly on the same connection (WAL mode allows concurrent
     readers even while a write is in progress).
-
-    Caller is responsible for calling close() on shutdown (or using
-    it as a context manager: `with PlayerDB(path) as db:`).
     """
 
     def __init__(self, path):
@@ -88,11 +92,22 @@ class PlayerDB:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(
             str(self.path), check_same_thread=False,
-            isolation_level=None,   # autocommit; we manage transactions manually
+            isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         log.info("PlayerDB opened at %s", self.path)
+
+    def _migrate(self):
+        """Apply any schema migrations needed for upgrading existing DBs."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(sessions)")}
+        if "hours_survived" not in cols:
+            try:
+                self._conn.execute(_MIGRATION_HOURS)
+                log.info("PlayerDB migrated: added sessions.hours_survived")
+            except Exception as e:
+                log.warning("PlayerDB migration failed (hours_survived): %s", e)
 
     def close(self):
         try:
@@ -112,9 +127,6 @@ class PlayerDB:
 
     def _upsert_account(self, cur, steamid, steam_name=None,
                         avatar_url=None, pz_hours=None):
-        """Insert or update a steam_accounts row. Only non-None fields
-        are written -- avoids clobbering a previously-fetched steam_name
-        with None just because this particular call didn't have one."""
         cur.execute("""
             INSERT INTO steam_accounts(steamid, steam_name, avatar_url, pz_hours, last_seen)
             VALUES (?, ?, ?, ?, ?)
@@ -126,11 +138,6 @@ class PlayerDB:
         """, (steamid, steam_name, avatar_url, pz_hours, time.time()))
 
     def _get_or_create_character(self, cur, steamid, username):
-        """Returns the character row id for (steamid, username), inserting
-        a new character row if this is the first time we've seen this
-        username under this Steam account. The same steamid with a
-        different username = a genuinely new character with its own
-        independent history."""
         row = cur.execute(
             "SELECT id FROM characters WHERE steamid=? AND username=?",
             (steamid, username),
@@ -145,9 +152,6 @@ class PlayerDB:
         return cur.lastrowid
 
     def _open_run(self, cur, character_id):
-        """Opens a new run row for this character. Called on join when no
-        open run exists for this character yet (first join ever, or
-        after a death that closed the previous run)."""
         cur.execute(
             "INSERT INTO runs(character_id, started_at) VALUES (?, ?)",
             (character_id, time.time()),
@@ -155,8 +159,6 @@ class PlayerDB:
         return cur.lastrowid
 
     def _current_run(self, cur, character_id):
-        """Returns the open (ended_at IS NULL) run row for this character,
-        or None. A character may have at most one open run at a time."""
         return cur.execute(
             "SELECT * FROM runs WHERE character_id=? AND ended_at IS NULL "
             "ORDER BY started_at DESC LIMIT 1",
@@ -164,8 +166,6 @@ class PlayerDB:
         ).fetchone()
 
     def _current_session(self, cur, character_id):
-        """Returns the open (ended_at IS NULL) session for this character,
-        or None."""
         return cur.execute(
             "SELECT * FROM sessions WHERE character_id=? AND ended_at IS NULL "
             "ORDER BY started_at DESC LIMIT 1",
@@ -173,24 +173,12 @@ class PlayerDB:
         ).fetchone()
 
     # ------------------------------------------------------------------
-    # Public write API -- called by discord_module.Watcher's on_* handlers
+    # Public write API
     # ------------------------------------------------------------------
 
     def on_join(self, steamid, username,
                 steam_name=None, avatar_url=None,
-                pz_hours=None, kills_snapshot=0):
-        """
-        Called when a player fully connects. Creates or updates the
-        steam_accounts row, ensures a character row exists for this
-        (steamid, username) pair, opens a run if none is open, and
-        opens a new session within that run.
-
-        kills_snapshot: the value read from the kills file at join time
-        (i.e. kills already on record for this player from a previous
-        session in the same run). Stored as kills_start on the new session
-        row so we can compute the true per-session delta at close time
-        rather than attributing the entire run total to this session.
-        """
+                pz_hours=None, kills_snapshot=0, hours_survived=None):
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN")
@@ -208,8 +196,6 @@ class PlayerDB:
                 else:
                     run_id = run["id"]
 
-                # Guard: close any stale open session (shouldn't happen
-                # in normal flow, but a crash/restart could leave one).
                 stale = self._current_session(cur, char_id)
                 if stale is not None:
                     log.warning(
@@ -223,9 +209,9 @@ class PlayerDB:
 
                 cur.execute(
                     "INSERT INTO sessions "
-                    "(run_id, character_id, started_at, kills_start) "
-                    "VALUES (?, ?, ?, ?)",
-                    (run_id, char_id, time.time(), kills_snapshot),
+                    "(run_id, character_id, started_at, kills_start, hours_survived) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (run_id, char_id, time.time(), kills_snapshot, hours_survived),
                 )
                 self._conn.execute("COMMIT")
                 log.debug("on_join: steamid=%s username=%s char_id=%d run_id=%d",
@@ -234,19 +220,11 @@ class PlayerDB:
                 self._conn.execute("ROLLBACK")
                 log.exception("on_join failed for steamid=%s username=%s", steamid, username)
 
-    def on_disconnect(self, steamid, username, kills_snapshot):
-        """
-        Closes the open session for this character. The run is left open
-        (player may rejoin on the same character without dying).
-        kills_snapshot: the mod-file value at disconnect time (= kills_end).
-        """
-        self._close_session(steamid, username, kills_snapshot, "disconnect")
+    def on_disconnect(self, steamid, username, kills_snapshot, hours_survived=None):
+        self._close_session(steamid, username, kills_snapshot, "disconnect",
+                            hours_survived=hours_survived)
 
-    def on_death(self, steamid, username, kills_snapshot):
-        """
-        Closes the open session AND the open run for this character.
-        kills_snapshot: the mod-file value at death time.
-        """
+    def on_death(self, steamid, username, kills_snapshot, hours_survived=None):
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN")
@@ -266,9 +244,9 @@ class PlayerDB:
                 sess = self._current_session(cur, char_id)
                 if sess:
                     cur.execute(
-                        "UPDATE sessions SET ended_at=?, ended_by='death', kills_end=? "
-                        "WHERE id=?",
-                        (now, kills_snapshot, sess["id"]),
+                        "UPDATE sessions SET ended_at=?, ended_by='death', "
+                        "kills_end=?, hours_survived=? WHERE id=?",
+                        (now, kills_snapshot, hours_survived, sess["id"]),
                     )
 
                 run = self._current_run(cur, char_id)
@@ -285,19 +263,14 @@ class PlayerDB:
                 log.exception("on_death failed for steamid=%s username=%s", steamid, username)
 
     def on_server_down(self, open_players):
-        """
-        Mass-close all open sessions for every player still connected
-        when the server goes down. Runs are left open -- server_down
-        doesn't mean the character died; they'll resume in the same run
-        on the next server start.
-        open_players: list of (steamid, username, kills_snapshot) tuples.
-        """
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN")
             try:
                 now = time.time()
-                for steamid, username, kills_snapshot in open_players:
+                for entry in open_players:
+                    steamid, username, kills_snapshot = entry[0], entry[1], entry[2]
+                    hours_survived = entry[3] if len(entry) > 3 else None
                     char_row = cur.execute(
                         "SELECT id FROM characters WHERE steamid=? AND username=?",
                         (steamid, username),
@@ -309,8 +282,8 @@ class PlayerDB:
                     if sess:
                         cur.execute(
                             "UPDATE sessions SET ended_at=?, ended_by='server_down', "
-                            "kills_end=? WHERE id=?",
-                            (now, kills_snapshot, sess["id"]),
+                            "kills_end=?, hours_survived=? WHERE id=?",
+                            (now, kills_snapshot, hours_survived, sess["id"]),
                         )
                 self._conn.execute("COMMIT")
                 log.debug("on_server_down: closed sessions for %d players", len(open_players))
@@ -320,14 +293,12 @@ class PlayerDB:
 
     def update_steam_info(self, steamid, steam_name=None,
                           avatar_url=None, pz_hours=None):
-        """Updates steam enrichment data for an account. Called after a
-        successful Steam API/XML lookup so the killboard can display
-        the Steam persona name without re-fetching on every page load."""
         with self._lock:
             cur = self._conn.cursor()
             self._upsert_account(cur, steamid, steam_name, avatar_url, pz_hours)
 
-    def _close_session(self, steamid, username, kills_snapshot, reason):
+    def _close_session(self, steamid, username, kills_snapshot, reason,
+                       hours_survived=None):
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("BEGIN")
@@ -348,8 +319,9 @@ class PlayerDB:
                     self._conn.execute("ROLLBACK")
                     return
                 cur.execute(
-                    "UPDATE sessions SET ended_at=?, ended_by=?, kills_end=? WHERE id=?",
-                    (time.time(), reason, kills_snapshot, sess["id"]),
+                    "UPDATE sessions SET ended_at=?, ended_by=?, kills_end=?, "
+                    "hours_survived=? WHERE id=?",
+                    (time.time(), reason, kills_snapshot, hours_survived, sess["id"]),
                 )
                 self._conn.execute("COMMIT")
                 log.debug("_close_session: char_id=%d reason=%s kills_end=%d",
@@ -360,7 +332,7 @@ class PlayerDB:
                               steamid, username)
 
     # ------------------------------------------------------------------
-    # Public read API -- called by the /killboard page
+    # Public read API
     # ------------------------------------------------------------------
 
     def get_killboard(self):
@@ -370,27 +342,28 @@ class PlayerDB:
             steamid, steam_name, avatar_url, pz_hours,
             account_kills (lifetime total across all characters),
             characters: list of dicts with:
-                username, char_kills, current_run_kills
+                username, char_kills, current_run_kills, best_hours_survived
         """
         cur = self._conn.cursor()
 
-        # Per-character lifetime kills (sum of closed session deltas)
         char_kills = {}
         for row in cur.execute("""
             SELECT c.id, c.steamid, c.username,
-                   COALESCE(SUM(s.kills_end - s.kills_start), 0) AS char_kills
+                   COALESCE(SUM(CASE WHEN s.kills_end IS NOT NULL
+                                THEN s.kills_end - s.kills_start ELSE 0 END), 0) AS char_kills,
+                   MAX(s.hours_survived) AS best_hours_survived
             FROM characters c
-            LEFT JOIN sessions s ON s.character_id = c.id AND s.kills_end IS NOT NULL
+            LEFT JOIN sessions s ON s.character_id = c.id
             GROUP BY c.id
         """):
             char_kills[row["id"]] = {
                 "steamid": row["steamid"],
                 "username": row["username"],
                 "char_kills": row["char_kills"],
+                "best_hours_survived": row["best_hours_survived"],
                 "current_run_kills": 0,
             }
 
-        # Current run kills (open session -- kills_end is NULL while live)
         for row in cur.execute("""
             SELECT s.character_id,
                    COALESCE(s.kills_end, s.kills_start) AS run_kills
@@ -400,7 +373,6 @@ class PlayerDB:
             if row["character_id"] in char_kills:
                 char_kills[row["character_id"]]["current_run_kills"] = row["run_kills"]
 
-        # Group by Steam account
         accounts = {}
         for row in cur.execute("SELECT * FROM steam_accounts ORDER BY last_seen DESC"):
             accounts[row["steamid"]] = {
@@ -415,7 +387,6 @@ class PlayerDB:
         for char_id, cd in char_kills.items():
             sid = cd["steamid"]
             if sid not in accounts:
-                # Character exists but account row is missing -- handle gracefully.
                 accounts[sid] = {
                     "steamid": sid,
                     "steam_name": sid,
@@ -429,11 +400,10 @@ class PlayerDB:
                 "username": cd["username"],
                 "char_kills": cd["char_kills"],
                 "current_run_kills": cd["current_run_kills"],
+                "best_hours_survived": cd["best_hours_survived"],
             })
 
-        # Sort characters within each account by char_kills desc
         for acc in accounts.values():
             acc["characters"].sort(key=lambda c: c["char_kills"], reverse=True)
 
-        # Sort accounts by account_kills desc
         return sorted(accounts.values(), key=lambda a: a["account_kills"], reverse=True)
