@@ -2,129 +2,118 @@ require "pzp_Shared"
 
 pzp.Server = pzp.Server or {}
 
-local DATA_FILE = "pzp_player_kills.json"
+local DATA_FILE = "pzp_player_kills.yaml"
 
 -- In-memory database.
 -- Structure: playerData[steamID] = {
 --     characters = {
 --         [username] = { kills=N, alive=bool, survived=N }
 --     },
---     lifetimeKills = N
+--     lifetimeKills = N   (sum of all characters' kills, recomputed on every save)
 -- }
 local playerData = {}
 
 
 -- ------------------------------------------------------------
--- JSON HELPERS
+-- YAML HELPERS
 -- ------------------------------------------------------------
 
--- Minimal JSON serialiser (numbers, strings, booleans, tables).
-local function jsonEncode(val, indent, level)
-    indent = indent or "  "
-    level = level or 0
-    local t = type(val)
-    if t == "boolean" then
-        return val and "true" or "false"
-    elseif t == "number" then
-        return tostring(val)
-    elseif t == "string" then
-        return '"' .. val:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"'
-    elseif t == "table" then
-        local pad = string.rep(indent, level)
-        local inner = string.rep(indent, level + 1)
-        local keys = {}
-        for k in pairs(val) do keys[#keys + 1] = k end
-        table.sort(keys, function(a, b)
-            return tostring(a) < tostring(b)
-        end)
-        local parts = {}
-        for _, k in ipairs(keys) do
-            local v = val[k]
-            parts[#parts + 1] = inner .. '"' .. tostring(k) .. '": ' ..
-                jsonEncode(v, indent, level + 1)
-        end
-        if #parts == 0 then return "{}" end
-        return "{\n" .. table.concat(parts, ",\n") .. "\n" .. pad .. "}"
-    end
-    return "null"
+-- Escape a string for YAML (single-quoted, escaping single quotes by doubling).
+local function yamlStr(s)
+    s = tostring(s)
+    return "'" .. s:gsub("'", "''") .. "'"
 end
 
--- Minimal JSON parser (handles the subset we write ourselves).
-local function jsonDecode(s)
-    local pos = 1
+-- Write playerData as YAML.
+-- Format:
+--   "steamid":
+--     lifetimeKills: N
+--     "username":
+--       kills: N
+--       alive: true/false
+--       survived: N
+local function yamlEncode(data)
+    local lines = {}
+    -- Sort steamIDs for deterministic output.
+    local steamIDs = {}
+    for sid in pairs(data) do steamIDs[#steamIDs + 1] = sid end
+    table.sort(steamIDs)
 
-    local function skipWS()
-        while pos <= #s and s:sub(pos, pos):match("%s") do
-            pos = pos + 1
+    for _, steamID in ipairs(steamIDs) do
+        local entry = data[steamID]
+        lines[#lines + 1] = yamlStr(steamID) .. ":"
+        lines[#lines + 1] = "  lifetimeKills: " .. tostring(entry.lifetimeKills or 0)
+
+        -- Sort usernames for deterministic output.
+        local usernames = {}
+        for uname in pairs(entry.characters) do usernames[#usernames + 1] = uname end
+        table.sort(usernames)
+
+        for _, uname in ipairs(usernames) do
+            local ch = entry.characters[uname]
+            lines[#lines + 1] = "  " .. yamlStr(uname) .. ":"
+            lines[#lines + 1] = "    kills: " .. tostring(ch.kills or 0)
+            lines[#lines + 1] = "    alive: " .. (ch.alive and "true" or "false")
+            lines[#lines + 1] = "    survived: " .. tostring(ch.survived or 0)
         end
     end
 
-    local parseValue
+    return table.concat(lines, "\n") .. "\n"
+end
 
-    local function parseString()
-        pos = pos + 1 -- skip opening "
-        local result = {}
-        while pos <= #s do
-            local c = s:sub(pos, pos)
-            if c == '"' then
-                pos = pos + 1
-                return table.concat(result)
-            elseif c == '\\' then
-                pos = pos + 1
-                local e = s:sub(pos, pos)
-                if e == '"' then result[#result+1] = '"'
-                elseif e == '\\' then result[#result+1] = '\\'
-                else result[#result+1] = e end
-            else
-                result[#result+1] = c
+-- Minimal YAML parser for the subset we write.
+-- Returns: { [steamid] = { lifetimeKills=N, characters={ [uname]={kills,alive,survived} } } }
+local function yamlDecode(s)
+    local result = {}
+    local currentSteamID = nil
+    local currentUsername = nil
+
+    for line in (s .. "\n"):gmatch("([^\n]*)\n") do
+        -- Strip trailing whitespace
+        local trimmed = line:match("^(.-)%s*$")
+        if trimmed == "" then
+            -- skip blank lines
+        elseif trimmed:match("^'(.+)':%s*$") then
+            -- top-level steamid key: 'steamid':
+            local sid = trimmed:match("^'(.*)':%s*$")
+            if sid then
+                currentSteamID = sid
+                currentUsername = nil
+                result[currentSteamID] = { lifetimeKills = 0, characters = {} }
             end
-            pos = pos + 1
-        end
-        return table.concat(result)
-    end
-
-    local function parseObject()
-        pos = pos + 1 -- skip {
-        local obj = {}
-        skipWS()
-        if s:sub(pos, pos) == "}" then pos = pos + 1; return obj end
-        while pos <= #s do
-            skipWS()
-            local key = parseString()
-            skipWS()
-            pos = pos + 1 -- skip :
-            skipWS()
-            obj[key] = parseValue()
-            skipWS()
-            local c = s:sub(pos, pos)
-            if c == "}" then pos = pos + 1; break end
-            if c == "," then pos = pos + 1 end
-        end
-        return obj
-    end
-
-    parseValue = function()
-        skipWS()
-        local c = s:sub(pos, pos)
-        if c == '"' then
-            return parseString()
-        elseif c == '{' then
-            return parseObject()
-        elseif c == 't' then
-            pos = pos + 4; return true
-        elseif c == 'f' then
-            pos = pos + 5; return false
-        elseif c == 'n' then
-            pos = pos + 4; return nil
-        else
-            -- number
-            local num = s:match("^-?%d+%.?%d*[eE]?[+-]?%d*", pos)
-            if num then pos = pos + #num; return tonumber(num) end
+        elseif trimmed:match("^  lifetimeKills:%s*(.+)$") then
+            local val = trimmed:match("^  lifetimeKills:%s*(.+)$")
+            if currentSteamID then
+                result[currentSteamID].lifetimeKills = tonumber(val) or 0
+            end
+        elseif trimmed:match("^  '(.+)':%s*$") then
+            -- username key under steamid: '  username':
+            local uname = trimmed:match("^  '(.*)':%s*$")
+            if uname and currentSteamID then
+                currentUsername = uname
+                result[currentSteamID].characters[currentUsername] = {
+                    kills = 0, alive = false, survived = 0
+                }
+            end
+        elseif trimmed:match("^    kills:%s*(.+)$") then
+            local val = trimmed:match("^    kills:%s*(.+)$")
+            if currentSteamID and currentUsername then
+                result[currentSteamID].characters[currentUsername].kills = tonumber(val) or 0
+            end
+        elseif trimmed:match("^    alive:%s*(.+)$") then
+            local val = trimmed:match("^    alive:%s*(.+)$")
+            if currentSteamID and currentUsername then
+                result[currentSteamID].characters[currentUsername].alive = (val == "true")
+            end
+        elseif trimmed:match("^    survived:%s*(.+)$") then
+            local val = trimmed:match("^    survived:%s*(.+)$")
+            if currentSteamID and currentUsername then
+                result[currentSteamID].characters[currentUsername].survived = tonumber(val) or 0
+            end
         end
     end
 
-    skipWS()
-    return parseValue()
+    return result
 end
 
 
@@ -150,29 +139,17 @@ local function loadData()
     local raw = table.concat(lines, "\n")
     if raw == "" then return end
 
-    local ok, decoded = pcall(jsonDecode, raw)
+    local ok, decoded = pcall(yamlDecode, raw)
     if not ok or type(decoded) ~= "table" then
-        print("[pzp] WARNING: Could not parse kill data JSON, starting fresh")
+        print("[pzp] WARNING: Could not parse kill data YAML, starting fresh")
         return
     end
 
     for steamID, entry in pairs(decoded) do
-        if type(entry) == "table" then
-            local chars = {}
-            for k, v in pairs(entry) do
-                if k ~= "lifetimeKills" and type(v) == "table" then
-                    chars[k] = {
-                        kills     = tonumber(v.kills)    or 0,
-                        alive     = v.alive == true,
-                        survived  = tonumber(v.survived) or 0,
-                    }
-                end
-            end
-            playerData[steamID] = {
-                characters   = chars,
-                lifetimeKills = tonumber(entry.lifetimeKills) or 0,
-            }
-        end
+        playerData[steamID] = {
+            characters    = entry.characters or {},
+            lifetimeKills = entry.lifetimeKills or 0,
+        }
     end
 
     print("[pzp] Loaded kill data for players")
@@ -184,7 +161,7 @@ end
 -- ------------------------------------------------------------
 
 local function saveData()
-    -- Rebuild lifetime kills from all characters before saving.
+    -- Recompute lifetimeKills as sum of all characters' kills.
     for steamID, entry in pairs(playerData) do
         local total = 0
         for _, ch in pairs(entry.characters) do
@@ -193,28 +170,13 @@ local function saveData()
         entry.lifetimeKills = total
     end
 
-    -- Build the table to serialise.
-    local out = {}
-    for steamID, entry in pairs(playerData) do
-        local row = { lifetimeKills = entry.lifetimeKills }
-        for username, ch in pairs(entry.characters) do
-            row[username] = {
-                kills    = ch.kills,
-                alive    = ch.alive,
-                survived = ch.survived,
-            }
-        end
-        out[steamID] = row
-    end
-
     local file = getFileWriter(DATA_FILE, true, false)
     if not file then
         print("[pzp] ERROR: Could not open kill data file for writing")
         return
     end
 
-    file:write(jsonEncode(out))
-    file:write("\n")
+    file:write(yamlEncode(playerData))
     file:close()
 
     print("[pzp] Kill data saved")
@@ -228,7 +190,7 @@ end
 local function updatePlayerKills(player, kills, hoursSurvived, steamID, isDeath)
     local username = tostring(player:getUsername())
 
-    -- Fallback: if client didn't send steamID use server-side lookup.
+    -- Fallback: server-side steamID lookup if client didn't send one.
     if not steamID or steamID == "" or steamID == "0" then
         steamID = tostring(player:getSteamID and player:getSteamID() or "unknown")
     end
@@ -240,7 +202,7 @@ local function updatePlayerKills(player, kills, hoursSurvived, steamID, isDeath)
 
     local entry = playerData[steamID]
 
-    -- Mark all other characters for this steam account as not alive.
+    -- Only one character alive at a time per account.
     for uname, ch in pairs(entry.characters) do
         if uname ~= username then
             ch.alive = false
@@ -280,24 +242,20 @@ local function onClientCommand(module, command, player, args)
         print("[pzp] ================================")
         print("[pzp] Kill update received")
         print("[pzp] Username: " .. tostring(player:getUsername()))
-        print("[pzp] SteamID: " .. tostring(args.steamID or "?"))
-        print("[pzp] Kills received: " .. tostring(args.kills))
-        print("[pzp] Hours survived: " .. tostring(args.hoursSurvived or 0))
-
+        print("[pzp] SteamID: "  .. tostring(args.steamID or "?"))
+        print("[pzp] Kills: "    .. tostring(args.kills))
+        print("[pzp] Hours: "    .. tostring(args.hoursSurvived or 0))
         updatePlayerKills(player, args.kills, args.hoursSurvived, args.steamID, false)
-
         print("[pzp] ================================")
 
     elseif command == pzp.Commands.PlayerDied then
         print("[pzp] ================================")
         print("[pzp] Death update received")
         print("[pzp] Username: " .. tostring(player:getUsername()))
-        print("[pzp] SteamID: " .. tostring(args.steamID or "?"))
-        print("[pzp] Kills received: " .. tostring(args.kills))
-        print("[pzp] Hours survived: " .. tostring(args.hoursSurvived or 0))
-
+        print("[pzp] SteamID: "  .. tostring(args.steamID or "?"))
+        print("[pzp] Kills: "    .. tostring(args.kills))
+        print("[pzp] Hours: "    .. tostring(args.hoursSurvived or 0))
         updatePlayerKills(player, args.kills, args.hoursSurvived, args.steamID, true)
-
         print("[pzp] ================================")
     end
 end

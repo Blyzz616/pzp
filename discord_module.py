@@ -23,8 +23,13 @@ Milestone shout-outs:
                Fires at most once per threshold per steamid, ever.
                Tracked in persistent state.
 
-Kills file format (v4.2.3): JSON keyed by steamid.
-  {steamid: {username: {kills, alive, survived}, lifetimeKills: N}}
+Kills file format (v4.2.5): YAML keyed by steamid.
+  'steamid':
+    lifetimeKills: N
+    'username':
+      kills: N
+      alive: true/false
+      survived: N
 """
 
 import configparser
@@ -206,13 +211,68 @@ class DiscordWebhook:
 
 # ---------------------------------------------------------------------------
 # Kills file reader
-# Format (v4.2.3): JSON keyed by steamid.
-# {steamid: {username: {kills, alive, survived}, lifetimeKills: N}}
+# Format (v4.2.5): YAML keyed by steamid.
+# 'steamid':
+#   lifetimeKills: N
+#   'username':
+#     kills: N
+#     alive: true/false
+#     survived: N
 # ---------------------------------------------------------------------------
 class KillsFile:
     def __init__(self, path):
         self.path = path
         self._mtime = None
+
+    @staticmethod
+    def _parse_yaml(text):
+        """Parse the YAML subset written by pzp_Server.lua."""
+        result = {}
+        current_steamid = None
+        current_username = None
+        for raw_line in text.splitlines():
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            m = re.match(r"^'(.*)':\s*$", line)
+            if m and not line.startswith("  "):
+                current_steamid = m.group(1)
+                current_username = None
+                result[current_steamid] = {"lifetimeKills": 0, "characters": {}}
+                continue
+            if current_steamid is None:
+                continue
+            m = re.match(r"^  lifetimeKills:\s*(.+)$", line)
+            if m:
+                try:
+                    result[current_steamid]["lifetimeKills"] = int(float(m.group(1)))
+                except ValueError:
+                    pass
+                continue
+            m = re.match(r"^  '(.*)':\s*$", line)
+            if m:
+                current_username = m.group(1)
+                result[current_steamid]["characters"][current_username] = {
+                    "kills": 0, "alive": False, "survived": 0.0
+                }
+                continue
+            if current_username is None:
+                continue
+            ch = result[current_steamid]["characters"][current_username]
+            m = re.match(r"^    kills:\s*(.+)$", line)
+            if m:
+                try: ch["kills"] = int(float(m.group(1)))
+                except ValueError: pass
+                continue
+            m = re.match(r"^    alive:\s*(.+)$", line)
+            if m:
+                ch["alive"] = m.group(1).strip() == "true"
+                continue
+            m = re.match(r"^    survived:\s*(.+)$", line)
+            if m:
+                try: ch["survived"] = float(m.group(1))
+                except ValueError: pass
+        return result
 
     def poll(self, force=False):
         try:
@@ -229,28 +289,15 @@ class KillsFile:
         if not text:
             return None
         try:
-            raw = json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            log.warning("Kills file is not valid JSON, skipping")
+            raw = self._parse_yaml(text)
+        except Exception:
+            log.warning("Kills file is not valid YAML, skipping")
             return None
-        # Returns {steamid: {characters: {username: {kills, alive, survived}}, lifetimeKills: N}}
         result = {}
         for steamid, entry in raw.items():
-            if not isinstance(entry, dict):
-                continue
-            lifetime = entry.get("lifetimeKills", 0)
-            characters = {}
-            for key, val in entry.items():
-                if key == "lifetimeKills" or not isinstance(val, dict):
-                    continue
-                characters[key] = {
-                    "kills": int(val.get("kills", 0)),
-                    "alive": bool(val.get("alive", False)),
-                    "survived": float(val.get("survived", 0.0)),
-                }
             result[steamid] = {
-                "characters": characters,
-                "lifetimeKills": int(lifetime),
+                "characters": entry.get("characters", {}),
+                "lifetimeKills": int(entry.get("lifetimeKills", 0)),
             }
         return result
 
@@ -630,6 +677,9 @@ class PlayerEventWatcher:
             if steamid and raw is not None:
                 sess = st.setdefault("session_kills", {})
                 sess[steamid] = sess.get(steamid, 0) + max(0, raw)
+            # New life starts at 0 — reset start_snap so partial calc is correct.
+            if steamid:
+                st.setdefault("session_kills_start", {})[steamid] = 0
         return raw
 
     # ------------------------------------------------------------------
@@ -750,18 +800,16 @@ class PlayerEventWatcher:
         fields = []
 
         kills_now = st.get("kills_current_run", {}).get(username, 0)
-        session_start = st.get("session_kills_start", {}).get(steamid, kills_now)
-        run_kills_so_far = kills_now - session_start
         lifetime_kills = st.get("kills_lifetime_by_steamid", {}).get(steamid)
 
-        # Row 1: Hours on Record (full width)
+        # Hours on Record (full width)
         if sp.get("pz_hours") is not None:
             fields.append({"name": "Hours on Record",
                            "value": f"{sp['pz_hours']:,}", "inline": False})
-        # Row 2: Lifetime kills (full width)
+        # Lifetime kills (full width)
         if lifetime_kills is not None:
             fields.append({"name": "Lifetime kills", "value": f"{lifetime_kills:,}", "inline": False})
-        # Logging in as (full width) — no spacer needed, inline:False handles the break
+        # Logging in as (full width)
         fields.append({"name": "Logging in as", "value": f"**{username}**", "inline": False})
         # Survived for | Current run (inline)
         ingame_survived = _fmt_ingame_time(st.get("hours_current_run", {}).get(username))
@@ -769,24 +817,21 @@ class PlayerEventWatcher:
             fields.append({"name": "Survived for", "value": ingame_survived, "inline": True})
         run_kills_str = str(kills_now) if kills_now > 0 else "No kills yet"
         fields.append({"name": "Current run", "value": f"{run_kills_str} kills", "inline": True})
-        # Spacer before recently played
-        fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
 
-        # Recently played: header + two games side by side
+        # Recently played: two games inline; first carries the section header as its name
         recent = sp.get("recent_games", [])
         if recent:
             from datetime import datetime
-            fields.append({"name": f"{persona or username} has also played:",
-                           "value": "\u200b", "inline": False})
-            for g in recent[:2]:
+            for i, g in enumerate(recent[:2]):
                 hrs = g.get("total_hours", 0)
                 name_g = g.get("name", "?")
                 last_played = g.get("last_played", 0)
                 lp_str = datetime.fromtimestamp(last_played).strftime("%d %b %Y") if last_played else ""
-                val = f"{hrs:,} hrs on record"
+                val = f"**{name_g}**\n{hrs:,} hrs on record"
                 if lp_str:
                     val += f"\nLast played: {lp_str}"
-                fields.append({"name": name_g, "value": val, "inline": True})
+                field_name = f"{persona or username} has also played:" if i == 0 else "\u200b"
+                fields.append({"name": field_name, "value": val, "inline": True})
 
         self.discord.embed(
             COLOURS["GREEN"],
@@ -827,7 +872,6 @@ class PlayerEventWatcher:
         start_snap = st.get("session_kills_start", {}).pop(steamid, 0)
         partial = (current_run_kills - start_snap) if current_run_kills is not None else 0
         session_kills_total = st.get("session_kills", {}).pop(steamid, 0) + max(0, partial)
-        lifetime_kills_total = st.get("kills_lifetime_by_steamid", {}).get(steamid)
         self.state.save()
 
         if self.db is not None:
