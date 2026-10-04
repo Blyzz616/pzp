@@ -1,4 +1,4 @@
-# PZ Panel &nbsp;·&nbsp; v4.2.5
+# PZ Panel &nbsp;·&nbsp; v4.6.4
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
 
@@ -19,9 +19,9 @@ A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage
 
 - **Status page** — start, stop, restart with live status indicator
 - **Config page** — edit server `.ini` settings directly from the browser (collapsible sections, cascading PVP/chat/safehouse toggles)
-- **Mod Manifest** — see all Workshop mods, update status, drag-to-reorder, add/remove with optional live-server restart
+- **Mod Manifest** — see all Workshop mods, update status, drag-to-reorder, add/remove with optional live-server restart. Add/Enable while the server's online queues the change for the next restart instead of forcing a stop. Surfaces when a mod's been downloaded (`WorkshopItems=`) but not yet loaded (`Mods=`) and offers a one-click Enable, closing the most common "I added a mod and it's not working" gap. Workshop items that bundle several mods get a checkbox picker so you choose which internal IDs go into `Mods=`
 - **Killboard** — per-player kill tracking (current run + lifetime), backed by a companion PZ Lua mod
-- **Console** — live streaming log view with filter and pause
+- **Console** — live streaming log view with filter and pause; switch between the main console log and any other log currently present in `Logs/` (connections, user, chat, cmd, PerkLog, etc.)
 - **Log** — action history for everything the panel touches
 - **Settings** — grouped, collapsible settings page with Linux/Windows platform toggle
 
@@ -44,7 +44,7 @@ sudo chown -R pzserver:pzserver /opt/pzp
 
 # Create and activate a virtualenv
 sudo -u pzserver python3 -m venv /opt/pzp/venv
-sudo -u pzserver /opt/pzp/venv/bin/pip install fastapi uvicorn requests
+sudo -u pzserver /opt/pzp/venv/bin/pip install -r /opt/pzp/requirements.txt
 
 # Copy and edit config
 sudo -u pzserver cp /opt/pzp/pzpanel.ini.example /opt/pzp/pzpanel.ini
@@ -63,7 +63,7 @@ sudo systemctl enable --now pzpanel
 1. Clone or download the repo into a folder (e.g. `C:\pzp`)
 2. Install Python 3.11+ and run:
    ```
-   pip install fastapi uvicorn requests
+   pip install -r requirements.txt
    ```
 3. Copy `pzpanel.ini.example` → `pzpanel.ini` and fill in `[rcon]` and `[paths]`
 4. Run `pzpanel_windows.bat` to start the panel
@@ -140,15 +140,21 @@ There is currently no built-in authentication - do not do this.
 ├── discord_module.py        # Player-event watcher + Discord embeds
 ├── player_db.py             # SQLite kill/session tracking
 ├── mod_restart.py           # Mod-update watchdog
-├── modcheck.py              # Workshop update checks
+├── ini_safe.py              # Backup + atomic writes for realm.ini
+├── modcheck.py              # Workshop update checks (WorkshopItems=/Mods=)
 ├── steam_workshop.py        # Steam API lookups
 ├── rcon.py                  # RCON client
 ├── actionlog.py             # Panel action log
 ├── countdown_control.py     # Restart countdown state
 ├── automation.py            # Watchdog pause flag
 ├── removed_mods.py          # Previously-removed mod list
+├── pending_mods.py          # Mod changes queued for the next restart
 ├── graceful_stop.py         # Graceful server stop helper
 ├── acf.py                   # Steam ACF parser
+├── server_config.py         # Config loading, server control, INI helpers
+├── ui_helpers.py            # HTML rendering helpers
+├── discord_webhook.py       # Shared Discord webhook client
+├── kill_tracker.py          # Kill-count data processor (pzp_Server.lua companion)
 ├── pzpanel.ini.example      # Config template
 ├── pzpanel.service          # systemd unit
 ├── pzpanel_windows.bat      # Windows launcher
@@ -160,6 +166,6 @@ There is currently no built-in authentication - do not do this.
 
 ## Version
 
-**v4.2.5** — disconnect embed always shows session kills; join embed lifetime kills stacked below hours on record
+**v4.6.4** — `requests` added to `requirements.txt` (the panel imports it at startup) and install steps now use `pip install -r requirements.txt` (adds the missing `python-multipart`); v4.6.3: description BBCode repairs truncated/odd markup (`[hr][/hr]`, cut-off `[b]`), adds `[quote]`/`[code]`/`[spoiler]`/`[img]`, and only allows http(s) links; v4.6.2: scrollbars match the dark theme and truncated descriptions no longer show raw `[list]`/`[*]` tags; v4.6.1: every panel edit of the server `.ini` is now backed up (`backups/`, newest 20) and written atomically; the Enable modal shows a checkbox picker (with each mod's `mod.info` name) when a Workshop item bundles more than one internal mod ID, so you pick which go into `Mods=`; "Needs Enable" now triggers only when none of a mod's IDs are enabled, so deliberately skipped placeholder IDs stop nagging.
 
 See `CHANGELOG.md` for full history.

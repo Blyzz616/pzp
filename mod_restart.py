@@ -13,7 +13,7 @@ controls whether a check cycle starts at all, not an already-running
 countdown.
 """
 
-__version__ = "4.1.0"
+__version__ = "4.6.4"
 
 import configparser
 import os
@@ -27,7 +27,7 @@ from steam_workshop import SteamWorkshopError
 from rcon import RCONClient, RCONError
 from actionlog import log_action
 from automation import is_paused, set_paused
-from discord_module import Discord
+from discord_webhook import Discord
 import countdown_control as cc
 import platform_compat as pc
 
@@ -140,6 +140,8 @@ def restart_server(cfg, reason):
     unit = cfg.get("server", "unit", fallback="pzserver")
     print(f"mod_restart: restarting server ({unit})")
     log_action("modcheck", "restart", reason)
+    import pending_mods
+    pending_mods.apply_pending()
     try:
         pc.server_restart(cfg)
         print("mod_restart: restart command completed")

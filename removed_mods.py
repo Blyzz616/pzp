@@ -6,28 +6,43 @@ pattern as the other small state files in this project (automation.py,
 countdown_control.py).
 """
 
-__version__ = "4.1.0"
+__version__ = "4.6.4"
 
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
-REMOVED_MODS_PATH = "/opt/pzp/removed_mods.json"
+import platform_compat as pc
+
+_FILE_NAME = "removed_mods.json"
+
+
+def _path():
+    """Cross-platform data dir -- this file predated the Windows port
+    and was still hardcoded to /opt/pzp (broken on Windows). Matches
+    the pattern used by automation.py and pending_mods.py."""
+    env_override = os.environ.get("PZPANEL_DATA_DIR", "").strip()
+    if env_override:
+        return Path(env_override) / _FILE_NAME
+    return pc.get_default_data_dir() / _FILE_NAME
 
 
 def _read():
     try:
-        with open(REMOVED_MODS_PATH, "r", encoding="utf-8") as f:
+        with open(_path(), "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 
 def _write(entries):
-    tmp = REMOVED_MODS_PATH + ".tmp"
+    path = _path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(entries, f)
-    os.replace(tmp, REMOVED_MODS_PATH)
+    os.replace(tmp, str(path))
 
 
 def get_removed_mods():

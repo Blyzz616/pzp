@@ -11,7 +11,7 @@ CLI smoke tests). Other commands follow the same documented protocol
 but haven't been individually exercised.
 """
 
-__version__ = "4.1.0"
+__version__ = "4.6.4"
 
 import socket
 import struct

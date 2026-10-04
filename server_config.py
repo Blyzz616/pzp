@@ -5,6 +5,8 @@ Extracted from main.py (v4.2.2) to keep the FastAPI app file focused on routes.
 All functions here are pure utility — no FastAPI imports, no app object.
 """
 
+__version__ = "4.6.4"
+
 import configparser
 import os
 import random
@@ -18,6 +20,7 @@ from pathlib import Path
 from rcon import RCONClient
 import countdown_control as cc
 import platform_compat as pc
+from ini_safe import safe_write_lines
 
 CONFIG_PATH = str(os.environ.get("PZPANEL_CONFIG") or pc.get_default_config_path())
 
@@ -66,6 +69,88 @@ def load_console_log_path():
     cfg = configparser.ConfigParser()
     cfg.read(CONFIG_PATH)
     return cfg.get("paths", "console_log", fallback="")
+
+
+_LOG_KIND_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}_(.+)\.txt$")
+
+
+def resolve_logs_dir():
+    """
+    Resolves the directory holding PZ's per-kind rotated log files
+    (connections/user/chat/cmd/PerkLog/etc, each named
+    <date>_<time>_<kind>.txt). Honors an explicit [player_events]
+    logs_dir override; otherwise derives it as the sibling "Logs"
+    directory next to the configured console_log path, matching PZ's
+    actual on-disk layout (.../Zomboid/server-console.txt sits next to
+    .../Zomboid/Logs/). Returns None if console_log isn't configured
+    and no override is set either.
+    """
+    cfg = _load_full_cfg()
+    override = cfg.get("player_events", "logs_dir", fallback="").strip()
+    if override:
+        return Path(override)
+    console_log = cfg.get("paths", "console_log", fallback="").strip()
+    if not console_log:
+        return None
+    return Path(console_log).parent / "Logs"
+
+
+def list_available_logs():
+    """
+    Returns [{"kind": ..., "path": ...}, ...] -- always starting with
+    the main console log (kind "console"), followed by the most recent
+    file per distinct kind currently present in the Logs/ directory,
+    kinds sorted alphabetically. A kind with no file in Logs/ right now
+    (e.g. nothing has triggered a PerkLog entry yet this session) simply
+    doesn't appear -- this reflects what's actually available to tail,
+    not a fixed guessed-at list of PZ's possible log kinds.
+    """
+    out = []
+    console_path = load_console_log_path()
+    if console_path:
+        out.append({"kind": "console", "path": console_path})
+    logs_dir = resolve_logs_dir()
+    if logs_dir and logs_dir.exists():
+        latest_by_kind = {}
+        try:
+            for p in logs_dir.iterdir():
+                m = _LOG_KIND_RE.match(p.name)
+                if not m:
+                    continue
+                kind = m.group(1)
+                if kind not in latest_by_kind or p.name > latest_by_kind[kind].name:
+                    latest_by_kind[kind] = p
+        except OSError:
+            pass
+        for kind in sorted(latest_by_kind):
+            out.append({"kind": kind, "path": str(latest_by_kind[kind])})
+    return out
+
+
+def resolve_log_path(kind):
+    """
+    Resolves a 'kind' identifier (as returned by list_available_logs)
+    to its CURRENT actual file path. Re-resolved fresh on every call --
+    unlike the main console log (one stable filename, rotated in place
+    via inode change on restart), a Logs/ kind's file gets a brand new
+    dated filename every server session, so "the current file for this
+    kind" can only be answered at call time, not cached.
+    """
+    if kind == "console" or not kind:
+        return load_console_log_path() or None
+    logs_dir = resolve_logs_dir()
+    if not logs_dir or not logs_dir.exists():
+        return None
+    latest = None
+    try:
+        for p in logs_dir.iterdir():
+            m = _LOG_KIND_RE.match(p.name)
+            if m and m.group(1) == kind:
+                if latest is None or p.name > latest.name:
+                    latest = p
+    except OSError:
+        return None
+    return str(latest) if latest else None
 
 
 def load_server_ini_path():
@@ -136,6 +221,9 @@ def run_server_action(action, cfg=None):
         raise ValueError(f"disallowed action: {action!r}")
     if cfg is None:
         cfg = _load_full_cfg()
+    if action in ("start", "restart"):
+        import pending_mods
+        pending_mods.apply_pending()
     if action == "start":
         return pc.server_start(cfg)
     if action == "stop":
@@ -240,17 +328,6 @@ def _update_ini_settings(updates):
 
 def _update_realm_ini(ini_path, updates):
     ini_path = Path(ini_path)
-    backup_dir = ini_path.parent / "backups"
-    backup_dir.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    backup_path = backup_dir / f"{ini_path.name}.{ts}"
-    shutil.copy2(str(ini_path), str(backup_path))
-    existing = sorted(backup_dir.glob(f"{ini_path.name}.*"))
-    for old in existing[:-20]:
-        try:
-            old.unlink()
-        except OSError:
-            pass
     with open(ini_path, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     key_re_cache = {}
@@ -264,8 +341,7 @@ def _update_realm_ini(ini_path, updates):
                 break
         if not found:
             lines.append(f"{key}={value}\n")
-    with open(ini_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    safe_write_lines(ini_path, lines)
 
 
 # ---------------------------------------------------------------------------

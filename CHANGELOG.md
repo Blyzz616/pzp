@@ -9,6 +9,205 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [4.6.4] - 2026-10-04
+
+### Fixed
+
+- **`requests` missing from `requirements.txt`.** `discord_module.py`
+  imports it at module level and `main.py` always imports
+  `discord_module`, so a venv built from `requirements.txt` alone could
+  not start the panel.
+- README install steps (Linux and Windows) now run
+  `pip install -r requirements.txt`. The old one-liner
+  (`fastapi uvicorn requests`) left out `python-multipart`, which the
+  panel's `Form` routes need.
+
+## [4.6.3] - 2026-10-04
+
+### Fixed
+
+- **More Steam BBCode rendering gaps.** `[hr][/hr]` left a literal
+  `[/hr]`; a description cut off mid-`[b]` left a dangling tag and
+  unbolded text. Truncation-damaged markup is now repaired: unclosed
+  paired tags are closed (inline tags before block tags so nesting stays
+  valid) and orphan closing tags are dropped instead of shown.
+
+### Added
+
+- BBCode: `[quote]` / `[quote=author]`, `[code]`, `[spoiler]`, `[img]`
+  (http/https only).
+
+### Security
+
+- `[url]` / `[url=...]` links are now limited to `http://` and
+  `https://`. Previously any scheme was accepted, so a mod author could
+  put a `javascript:` link in a description that would run when clicked
+  in the panel.
+
+## [4.6.2] - 2026-10-04
+
+### Fixed
+
+- **Default light scrollbars clashed with the dark theme** (visible on
+  the mod detail/remove/enable modals and anywhere else content scrolls).
+  All scrollbars now use the panel's dark track and amber thumb (thin
+  `scrollbar-color` on Firefox, `::-webkit-scrollbar` elsewhere).
+- **A truncated description could leave a literal `[list]` / `[*]` on
+  screen.** Descriptions are cut at a character limit; when the cut fell
+  inside a list the closing `[/list]` was lost and the BBCode renderer
+  left the tags as text. Unbalanced `[list]`/`[olist]` are now closed
+  before rendering so the items show as a bullet list.
+
+## [4.6.1] - 2026-10-03
+
+### Changed
+
+- **Every panel edit of the server `.ini` is now backed up and written
+  atomically.** New `ini_safe.py`: `safe_write_lines()` copies the current
+  file to `<ini dir>/backups/` (newest 20 kept), writes a temp file beside
+  it, fsyncs, then `os.replace()`s it in -- a crash or full disk mid-write
+  can no longer leave a truncated `realm.ini`. File permissions are
+  preserved. If the directory isn't writable for a temp file it falls back
+  to an in-place write; a failed backup is logged but doesn't block the edit.
+  Covers Add/Remove/Reorder/Enable of mods (`modcheck.py`) and the Config
+  page (`server_config._update_realm_ini`, which previously had its own
+  backup logic -- now shared).
+
+## [4.6.0] - 2026-10-03
+
+### Added
+
+- **Checkbox picker in the Enable modal for multi-mod Workshop items.**
+  When a Workshop item bundles more than one internal mod ID (e.g.
+  Functional Gutters: `FunctionalGutters` and `FunctionalGuttersRemoved`),
+  the Enable modal now lists each with its `mod.info` `name=` and lets you
+  choose which to add to `Mods=`. Single-ID mods keep the one-click flow.
+  Works for both direct enable (server offline) and queue-for-restart.
+  Only the ticked IDs are written/queued.
+- `modcheck.get_local_mod_details()` and an `internal_details` field on
+  `check_for_updates()` results (id, name, enabled).
+
+### Changed
+
+- **"Needs Enable" now triggers only when none of a mod's internal IDs are
+  in `Mods=`** (previously: any missing). Otherwise a deliberately skipped
+  placeholder ID would flag the mod forever. Trade-off: a mod with one ID
+  enabled and another genuinely forgotten is no longer flagged.
+
+## [4.5.0] - 2026-10-03
+
+### Fixed
+
+- **Queuing an Enable gave no persistent indication it had actually
+  happened.** Queuing doesn't change `needs_enable` (nothing's applied
+  until the next restart), so the row kept showing the exact same
+  "Needs Enable" tag and Enable button as if nothing had been clicked
+  -- the only feedback was a transient top-of-page banner. The Mod
+  Manifest now cross-references the pending-mods queue per row: a mod
+  with a queued enable shows a distinct "Enable Queued" tag and the
+  Enable button is hidden (nothing more to do until the next restart,
+  or cancel it from the Queued for Next Restart section below).
+- **Mod descriptions showed raw Steam BBCode markup** (`[h2]`, `[b]`,
+  `[list]`/`[*]`/`[/list]`, etc.) as literal bracketed text instead of
+  being rendered. New `ui_helpers._render_bbcode()` converts a common
+  subset (h1-h3, b/i/u/s, list/olist, url, hr) into safe HTML --
+  escapes the raw text first so embedded HTML/script in a description
+  can't execute, then layers the recognized tags on top of the
+  already-escaped text. Not a claim of covering Steam's complete BBCode
+  spec, just what actually shows up in real descriptions; an
+  unrecognized or truncation-mangled tag is left as literal text rather
+  than breaking the page.
+  - Required switching the Detail/Remove modal JS from `.textContent`
+    to `.innerHTML` for the description field specifically (title/meta
+    fields unchanged) -- safe here because the string being assigned is
+    the already-escaped-then-formatted output of `_render_bbcode()`,
+    not raw user input.
+
+## [4.4.0] - 2026-10-03
+
+### Added
+
+- **Closed the WorkshopItems=/Mods= gap** that was the actual cause of
+  "I added a mod and it's not working": `add_workshop_item()` only
+  ever controlled *downloading* a mod, never *loading* it -- that
+  needs the mod's internal string ID in `Mods=`, which isn't knowable
+  until the content has actually been downloaded (read from its
+  `mod.info`). This was previously silent and undiscoverable without
+  SSHing in and reading `mod.info` by hand.
+  - `modcheck.py`: new `get_mods_line_ids()` (reads `Mods=`) and
+    `add_mods_line_items()` (appends to it, mirroring
+    `add_workshop_item()`). `check_for_updates()` now returns
+    `internal_ids` and `needs_enable` per mod -- true when the mod's
+    internal ID(s) are known (downloaded) but not yet in `Mods=`.
+  - Mod Manifest: a new "Needs Enable" status tag, and an **Enable**
+    button next to Remove whenever it applies. Confirms immediately if
+    the server's offline, or queues for the next restart if it's
+    online (same modal pattern as Add/Remove/Re-add).
+  - `pending_mods.py` generalized to carry two kinds of queued change
+    (`workshop_add` and `mods_enable`) instead of just one -- the
+    "Queued for Next Restart" section now shows an Action column so
+    it's clear which step is pending for a given mod, and the queue
+    entry's `kind` is now required to cancel the right one (a mod can
+    in principle have both kinds queued at once, though not in
+    practice since needs_enable can't be true until WorkshopItems= has
+    already landed and been downloaded).
+
+## [4.3.0] - 2026-10-03
+
+### Added
+
+- **Queue a mod addition while the server is online**, to be applied
+  automatically at the next server start or restart instead of forcing
+  an immediate stop. New `pending_mods.py` (same JSON-file pattern as
+  `removed_mods.py`). The Add Mod page now shows "Queue for Next
+  Restart" instead of blocking with "server must be stopped" when
+  online; a new "Queued for Next Restart" section on the Mods page
+  lists what's pending with a Cancel button, for changing your mind
+  before the next restart happens.
+  - Applied via `pending_mods.apply_pending()`, called right before the
+    server process actually starts -- hooked into both places that
+    trigger an actual start/restart: `server_config.run_server_action()`
+    (manual Start/Restart, and the start leg of remove/readd/reorder)
+    and `mod_restart.restart_server()` (the automated mod-sync
+    countdown restart, which calls `platform_compat.server_restart()`
+    directly and bypasses `run_server_action()` entirely -- needed its
+    own hook).
+  - Cross-platform by construction: on Linux, the pending-mods edit to
+    `WorkshopItems=` happens as plain synchronous Python *before*
+    `systemctl start/restart` is invoked, so no `ExecStartPre=` or
+    systemd unit changes were needed at all.
+- **Console page: switch between log files in real time.** Previously
+  only showed the single configured `console_log`. Now defaults to it
+  but offers tabs for every other log kind currently present in the
+  `Logs/` directory (connections, user, chat, cmd, PerkLog, pvp,
+  ClientActionLog, DebugLog-server, etc. -- whatever's actually there,
+  not a fixed guessed-at list), with the active one highlighted and
+  unclickable. `_tail_file_events()` generalized to accept a resolver
+  callable instead of just a fixed path, since Logs/ files rotate by
+  getting a brand-new dated filename each session (unlike the main
+  console log, which keeps one stable name and rotates via inode
+  change) -- the resolver is re-invoked every poll so a new session's
+  file is picked up automatically mid-stream.
+
+### Fixed
+
+- **`discord_module.py`'s connections-log watcher had a hardcoded
+  Linux-only path** (`/home/pzserver/Zomboid/Logs`), silently ignoring
+  the `[player_events] logs_dir` override already exposed in Settings
+  and guaranteed broken on a Windows install. Replaced with the same
+  `server_config.resolve_logs_dir()` the new console log-switcher uses
+  (override if set, else derived from `console_log`'s directory).
+- **`removed_mods.py` was still hardcoded to `/opt/pzp/removed_mods.json`**,
+  predating the Windows port -- also broken on Windows. Switched to the
+  same cross-platform data-dir pattern as `automation.py` and the new
+  `pending_mods.py`. No-op on the existing Linux deployment (resolves
+  to the identical path), so no migration needed there.
+- **Five files were silently missing `__version__` entirely**
+  (`server_config.py`, `ui_helpers.py`, `discord_module.py`,
+  `discord_webhook.py`, `kill_tracker.py`) -- all introduced during the
+  Windows-port/Discord-merge/main.py-split work without carrying the
+  project's "every file gets the version" convention forward. Added.
+
 ## [4.2.5] - 2026-09-13
 
 ### Fixed

@@ -6,8 +6,11 @@ utilities with no FastAPI imports. They depend on server_config for
 load_server_config() and PAGE_STYLE.
 """
 
+__version__ = "4.6.4"
+
 import html
 import random
+import re
 from datetime import datetime, timedelta, timezone
 
 from server_config import load_server_config
@@ -106,6 +109,11 @@ code{font-family:'JetBrains Mono',monospace;background:#0d110a;padding:.1rem .35
 .console-box::-webkit-scrollbar{width:10px}.console-box::-webkit-scrollbar-track{background:var(--void)}
 .console-box::-webkit-scrollbar-thumb{background:var(--amber-dim);border-radius:2px;border:2px solid var(--void)}
 .console-box::-webkit-scrollbar-thumb:hover{background:var(--amber)}
+* {scrollbar-width:thin;scrollbar-color:var(--amber-dim) var(--void)}
+*::-webkit-scrollbar{width:10px;height:10px}*::-webkit-scrollbar-track{background:var(--void)}
+*::-webkit-scrollbar-thumb{background:var(--amber-dim);border-radius:2px;border:2px solid var(--void)}
+*::-webkit-scrollbar-thumb:hover{background:var(--amber)}
+*::-webkit-scrollbar-corner{background:var(--void)}
 .lvl-log{color:var(--ink);font-weight:600}.lvl-warn{color:var(--amber);font-weight:700}.lvl-error{color:var(--rust);font-weight:700}.lvl-server-started{color:var(--signal);font-weight:700;background:rgba(111,191,90,.08);display:block}.lvl-steam-connect{color:var(--info);font-weight:600;display:block}
 .drag-handle{cursor:grab;color:var(--ink-dim);text-align:center;font-size:1.1rem;user-select:none;width:1.6rem}
 .drag-handle:active{cursor:grabbing}tr.dragging{opacity:.35}
@@ -245,15 +253,109 @@ def _steam_id_link(mod_id):
             f'target="_blank" rel="noopener noreferrer">{html.escape(mod_id)}</a>')
 
 
+_BBCODE_SIMPLE_SUBS = [
+    (re.compile(r'\[h1\](.*?)\[/h1\]', re.IGNORECASE | re.DOTALL),
+     r'<strong style="display:block;font-size:1.15em;margin:.6em 0 .3em;">\1</strong>'),
+    (re.compile(r'\[h2\](.*?)\[/h2\]', re.IGNORECASE | re.DOTALL),
+     r'<strong style="display:block;font-size:1.08em;margin:.6em 0 .3em;">\1</strong>'),
+    (re.compile(r'\[h3\](.*?)\[/h3\]', re.IGNORECASE | re.DOTALL),
+     r'<strong style="display:block;margin:.5em 0 .2em;">\1</strong>'),
+    (re.compile(r'\[b\](.*?)\[/b\]', re.IGNORECASE | re.DOTALL), r'<strong>\1</strong>'),
+    (re.compile(r'\[i\](.*?)\[/i\]', re.IGNORECASE | re.DOTALL), r'<em>\1</em>'),
+    (re.compile(r'\[u\](.*?)\[/u\]', re.IGNORECASE | re.DOTALL),
+     r'<span style="text-decoration:underline;">\1</span>'),
+    (re.compile(r'\[(?:s|strike)\](.*?)\[/(?:s|strike)\]', re.IGNORECASE | re.DOTALL),
+     r'<span style="text-decoration:line-through;">\1</span>'),
+    (re.compile(r'\[hr\](?:\s*\[/hr\])?', re.IGNORECASE), r'<hr style="border-color:var(--line);margin:.6em 0;">'),
+    (re.compile(r'\[url=(https?://[^\]\s]*)\](.*?)\[/url\]', re.IGNORECASE | re.DOTALL),
+     r'<a href="\1" target="_blank" rel="noopener noreferrer" class="link">\2</a>'),
+    (re.compile(r'\[url\](https?://[^\[\s]*?)\[/url\]', re.IGNORECASE | re.DOTALL),
+     r'<a href="\1" target="_blank" rel="noopener noreferrer" class="link">\1</a>'),
+    (re.compile(r'\[quote(?:=[^\]]*)?\](.*?)\[/quote\]', re.IGNORECASE | re.DOTALL),
+     r'<blockquote style="margin:.5em 0;padding:.3em .8em;border-left:3px solid var(--line);color:var(--ink-dim);">\1</blockquote>'),
+    (re.compile(r'\[code\](.*?)\[/code\]', re.IGNORECASE | re.DOTALL),
+     r'<code style="display:block;white-space:pre-wrap;margin:.4em 0;padding:.4em .6em;background:var(--void);">\1</code>'),
+    (re.compile(r'\[spoiler\](.*?)\[/spoiler\]', re.IGNORECASE | re.DOTALL),
+     r'<span style="border:1px dashed var(--line);padding:0 .3em;">\1</span>'),
+    (re.compile(r'\[img\](https?://[^\s\[\]]+?)\[/img\]', re.IGNORECASE),
+     r'<img src="\1" alt="" style="max-width:100%;height:auto;display:block;margin:.4em 0;">'),
+]
+
+# Order matters: inline tags are closed before block tags so a cut-off
+# "[list][*][b]x" becomes "...[/b][/list]", never an overlapping pair.
+_BBCODE_PAIRED_TAGS = ("b", "i", "u", "s", "strike", "h1", "h2", "h3", "code",
+                       "spoiler", "quote", "list", "olist")
+_BBCODE_STRAY_CLOSER_RE = re.compile(
+    r'\[/(?:hr|list|olist|h1|h2|h3|b|i|u|s|strike|quote|code|spoiler|url)\]', re.IGNORECASE)
+
+_BBCODE_LIST_RE = re.compile(r'\[list\](.*?)\[/list\]', re.IGNORECASE | re.DOTALL)
+_BBCODE_OLIST_RE = re.compile(r'\[olist\](.*?)\[/olist\]', re.IGNORECASE | re.DOTALL)
+_BBCODE_ITEM_SPLIT_RE = re.compile(r'\[\*\]', re.IGNORECASE)
+
+
+def _render_bbcode(raw_text):
+    """
+    Converts a common subset of Steam Workshop's BBCode-like description
+    markup into safe HTML: [h1]-[h3], [b]/[i]/[u]/[s] (or [strike]),
+    [list]/[*]/[/list], [olist], [url]/[url=...], [hr]. This is NOT a
+    claim of covering Steam's complete/official BBCode spec -- just the
+    tags that actually show up in real Workshop descriptions. An
+    unrecognized or malformed tag (e.g. one cut off by this project's
+    own description-length truncation) is left as literal escaped text
+    rather than breaking the page.
+
+    Escapes the raw text FIRST (so any literal HTML/script a mod author
+    put in a description can't execute), then layers the recognized
+    tags on top of the already-escaped text -- safe because escaping
+    only touches &/</>/"/', never the square brackets these patterns
+    match on.
+    """
+    raw_text = raw_text or ""
+    # Description truncation can cut markup in half, leaving an opener with
+    # no closer ([list] with no [/list], a dangling [b]) -- close any
+    # unbalanced paired tags so the content still renders, then drop stray
+    # closers (e.g. "[/hr]", or a [/b] whose opener was cut) rather than
+    # showing them as literal text.
+    for _tag in _BBCODE_PAIRED_TAGS:
+        _open = len(re.findall(rf"\[{_tag}(?:=[^\]]*)?\]", raw_text, re.IGNORECASE))
+        _close = len(re.findall(rf"\[/{_tag}\]", raw_text, re.IGNORECASE))
+        if _open > _close:
+            raw_text += f"[/{_tag}]" * (_open - _close)
+    text = html.escape(raw_text)
+
+    def _list_repl(tag):
+        def repl(m):
+            items = [i.strip() for i in _BBCODE_ITEM_SPLIT_RE.split(m.group(1)) if i.strip()]
+            if not items:
+                return ""
+            lis = "".join(f"<li>{i}</li>" for i in items)
+            return f'<{tag} style="margin:.3em 0 .6em;padding-left:1.3em;">{lis}</{tag}>'
+        return repl
+
+    text = _BBCODE_LIST_RE.sub(_list_repl("ul"), text)
+    text = _BBCODE_OLIST_RE.sub(_list_repl("ol"), text)
+
+    for pattern, repl in _BBCODE_SIMPLE_SUBS:
+        text = pattern.sub(repl, text)
+
+    text = _BBCODE_STRAY_CLOSER_RE.sub("", text)
+
+    # Preserve literal line breaks -- Workshop descriptions commonly use
+    # them for paragraph breaks outside of any BBCode tag.
+    text = text.replace("\n", "<br>")
+    return text
+
+
 def _mod_identity_cells(mod_id, title, preview_url, description, desc_limit=800):
     mod_id = mod_id or ""
     title = title or mod_id
     desc_snippet = (description or "")[:desc_limit]
+    rendered_desc = _render_bbcode(desc_snippet)
     data_attrs = (
         f'data-mod-id="{html.escape(mod_id, quote=True)}" '
         f'data-title="{html.escape(title, quote=True)}" '
         f'data-preview="{html.escape(preview_url or "", quote=True)}" '
-        f'data-description="{html.escape(desc_snippet, quote=True)}"'
+        f'data-description="{html.escape(rendered_desc, quote=True)}"'
     )
     thumb_html = (
         f'<button type="button" class="thumb-btn" {data_attrs} onclick="openDetailModal(this)">'
@@ -276,6 +378,9 @@ def _mod_status_tag(r):
     note_attr = f' title="{html.escape(r["note"])}"' if r["note"] else ""
     if r["update_available"]:
         return '<span class="tag warn">Update available</span>'
+    if r.get("needs_enable"):
+        return ('<span class="tag info" title="Downloaded but not loaded -- '
+                'add its internal ID to Mods= to actually enable it">Needs Enable</span>')
     if r["live_ts"] is None:
         return f'<span class="tag muted"{note_attr}>Lookup failed</span>'
     if r["installed_ts"] is None:

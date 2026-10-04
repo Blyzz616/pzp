@@ -13,7 +13,7 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "4.2.5"
+__version__ = "4.6.4"
 
 import asyncio
 import html
@@ -33,12 +33,13 @@ from fastapi.staticfiles import StaticFiles
 
 from rcon import RCONClient
 from modcheck import (check_for_updates, add_workshop_item, remove_workshop_item,
-                       reorder_workshop_items, ModCheckError)
+                       reorder_workshop_items, add_mods_line_items, ModCheckError)
 from steam_workshop import get_mod_details, SteamWorkshopError
 from actionlog import log_action, read_recent
 from automation import is_paused, set_paused
 import countdown_control as cc
 import removed_mods
+import pending_mods
 import discord_module
 from discord_module import _fmt_ingame_time
 import player_db as pdb
@@ -49,6 +50,7 @@ from server_config import (
     load_server_config, load_console_log_path, load_server_ini_path,
     get_multiplayer_save_dir, get_server_state, run_server_action,
     load_rcon_config, rcon_reachable, _countdown_summary,
+    list_available_logs, resolve_log_path,
     _read_all_settings, _update_ini_settings, _update_realm_ini,
     _find_candidate_files, _find_exact_named_files,
     _read_realm_ini, _bool_val, _ini_bool,
@@ -58,6 +60,7 @@ from ui_helpers import (
     PAGE_STYLE, page_shell, _led_style,
     _fmt_ts, _fmt_log_time, _fmt_removed_at,
     _steam_id_link, _mod_identity_cells, _thumb_html, _mod_status_tag,
+    _render_bbcode,
 )
 
 log = logging.getLogger("pzpanel")
@@ -444,6 +447,8 @@ def mods_page(request: Request):
         list_html = f'<p style="color:var(--rust);">Could not check mods: {html.escape(error)}</p>'
         reorder_script = ""
     else:
+        pending_enable_ids = {e.get("mod_id") for e in pending_mods.get_pending()
+                               if e.get("kind") == "mods_enable"}
         rows = []
         original_order = []
         for r in results:
@@ -451,16 +456,31 @@ def mods_page(request: Request):
             description = (r.get("description") or "").strip()
             desc_snippet = description[:400]
             thumb_html, title_html = _mod_identity_cells(r['mod_id'], r['title'], r.get('preview_url'), description)
+            is_queued_for_enable = r.get("needs_enable") and r["mod_id"] in pending_enable_ids
+            if is_queued_for_enable:
+                status_html = ('<span class="tag warn" title="Queued -- will be added to Mods= '
+                              'at the next server start or restart">Enable Queued</span>')
+            else:
+                status_html = _mod_status_tag(r)
+            enable_html = ""
+            if r.get("needs_enable") and not is_queued_for_enable:
+                enable_html = (f'<button type="button" class="link-add" '
+                              f'data-mod-id="{html.escape(r["mod_id"], quote=True)}" '
+                              f'data-title="{html.escape(r["title"], quote=True)}" '
+                              f'data-preview="{html.escape(r.get("preview_url") or "", quote=True)}" '
+                              f'data-internal-ids="{html.escape(json.dumps(r["internal_ids"]), quote=True)}" '
+                              f'data-internal-details="{html.escape(json.dumps(r.get("internal_details", [])), quote=True)}" '
+                              f'onclick="openEnableModal(this)">Enable</button>&nbsp;')
             rows.append(f"""<tr data-mod-id="{html.escape(r['mod_id'], quote=True)}">
                 <td class="drag-handle" draggable="true">&#9776;</td>
                 <td>{thumb_html}</td><td>{title_html}</td>
                 <td>{_steam_id_link(r['mod_id'])}</td>
-                <td>{_mod_status_tag(r)}</td>
-                <td><button type="button" class="link-remove"
+                <td>{status_html}</td>
+                <td style="white-space:nowrap;">{enable_html}<button type="button" class="link-remove"
                     data-mod-id="{html.escape(r['mod_id'], quote=True)}"
                     data-title="{html.escape(r['title'], quote=True)}"
                     data-preview="{html.escape(r.get('preview_url') or '', quote=True)}"
-                    data-description="{html.escape(desc_snippet, quote=True)}"
+                    data-description="{html.escape(_render_bbcode(desc_snippet), quote=True)}"
                     onclick="openRemoveModal(this)">Remove</button></td>
             </tr>""")
         mod_word = "mod" if len(results) == 1 else "mods"
@@ -480,6 +500,36 @@ def mods_page(request: Request):
         reorder_script = f"""<script>(function(){{var tbody=document.getElementById('mods-tbody');if(!tbody)return;var originalOrder={json.dumps(original_order)};var dragSrc=null;function getCurrentOrder(){{return Array.prototype.map.call(tbody.querySelectorAll('tr[data-mod-id]'),function(tr){{return tr.dataset.modId;}});}}function updateReorderVisibility(){{var current=getCurrentOrder();var changed=current.length!==originalOrder.length||current.some(function(id,i){{return id!==originalOrder[i];}});var wrap=document.getElementById('reorder-apply-wrap');if(wrap)wrap.style.display=changed?'':'none';var input=document.getElementById('reorder-order-input');if(input)input.value=JSON.stringify(current);}}Array.prototype.forEach.call(tbody.querySelectorAll('.drag-handle'),function(handle){{handle.addEventListener('dragstart',function(e){{dragSrc=handle.closest('tr');e.dataTransfer.effectAllowed='move';dragSrc.classList.add('dragging');}});handle.addEventListener('dragend',function(){{if(dragSrc)dragSrc.classList.remove('dragging');dragSrc=null;updateReorderVisibility();}});}});Array.prototype.forEach.call(tbody.querySelectorAll('tr[data-mod-id]'),function(row){{row.addEventListener('dragover',function(e){{if(!dragSrc||dragSrc===row)return;e.preventDefault();var rect=row.getBoundingClientRect();var after=(e.clientY-rect.top)/(rect.bottom-rect.top)>0.5;tbody.insertBefore(dragSrc,after?row.nextSibling:row);}});}});}})();</script>"""
 
     add_mod_html = '<p style="text-align:right;margin:1rem 0 0;"><a href="/mods/add" class="btn primary">+ Add Mod</a></p>'
+
+    pending_entries = pending_mods.get_pending()
+    if pending_entries:
+        pending_rows = []
+        for e in pending_entries:
+            title = e.get("title") or e.get("mod_id", "")
+            mod_id = e.get("mod_id", "")
+            kind = e.get("kind", "workshop_add")
+            kind_label = "Enable (Mods=)" if kind == "mods_enable" else "Add (WorkshopItems=)"
+            thumb_html, title_html = _mod_identity_cells(mod_id, title, e.get('preview_url'), "")
+            pending_rows.append(f"""<tr>
+                <td>{thumb_html}</td><td>{title_html}</td>
+                <td>{_steam_id_link(mod_id)}</td>
+                <td class="mono" style="font-size:.68rem;">{html.escape(kind_label)}</td>
+                <td class="mono">{_fmt_removed_at(e.get('queued_at'))}</td>
+                <td style="white-space:nowrap;">
+                    <button type="button" class="link-remove"
+                        onclick="cancelPendingMod('{html.escape(mod_id, quote=True)}','{html.escape(kind, quote=True)}',this)">Cancel</button>
+                </td>
+            </tr>""")
+        pending_count = len(pending_entries)
+        pending_mod_word = "Mod" if pending_count == 1 else "Mods"
+        pending_html = f"""<div style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--line);">
+            <p class="eyebrow" style="margin-bottom:.75rem;letter-spacing:.06em;text-align:center;">Queued for Next Restart</p>
+            <table><tr><th></th><th>Mod</th><th>ID</th><th>Action</th><th>Queued</th><th></th></tr>{"".join(pending_rows)}</table>
+            <p class="note">{pending_count} {pending_mod_word} will be applied automatically at the next server start or restart.</p>
+        </div>"""
+    else:
+        pending_html = ""
+
     removed_entries = removed_mods.get_removed_mods()
     if removed_entries:
         removed_rows = []
@@ -541,19 +591,42 @@ def mods_page(request: Request):
                         <input type="hidden" id="readd-mod-id-input" name="mod_id" value="">
                         <button type="submit" class="btn primary" id="readd-confirm-btn">Confirm Re-add</button>
                     </form></div></div></div>
+        <div id="enable-modal-backdrop" class="modal-backdrop" onclick="if(event.target===this) closeEnableModal()">
+            <div class="modal-box" style="--modal-accent:var(--info);"><p class="modal-eyebrow">Enable mod</p>
+                <img id="enable-thumb" class="modal-thumb" src="" alt="" style="display:none;">
+                <p class="modal-title" id="enable-title"></p><p class="modal-meta" id="enable-meta"></p>
+                <p class="modal-desc">Downloaded but not loaded yet -- this adds the internal ID above to
+                <code>Mods=</code> so Project Zomboid actually runs it. <code>WorkshopItems=</code> alone
+                only tells the server to download a mod, not to use it.</p>
+                <div id="enable-picker" class="checkbox-group" style="display:none;margin:.5rem 0 .75rem;"></div>
+                <p class="modal-desc" id="enable-picker-hint" style="display:none;">This Workshop item bundles several mods. Tick the ones to load -- leave out any placeholder/legacy entries (e.g. names ending in <code>Removed</code>).</p>
+                <p class="modal-desc" id="enable-online-note" style="display:none;color:var(--amber);"></p>
+                <div class="modal-actions"><button type="button" class="btn" onclick="closeEnableModal()">Cancel</button>
+                    <form method="post" id="enable-confirm-form" action="/mods/enable" onsubmit="return submitEnableForm()">
+                        <input type="hidden" id="enable-mod-id-input" name="mod_id" value="">
+                        <input type="hidden" id="enable-title-input" name="title" value="">
+                        <input type="hidden" id="enable-preview-input" name="preview_url" value="">
+                        <input type="hidden" id="enable-ids-input" name="internal_ids" value="[]">
+                        <button type="submit" class="btn primary" id="enable-confirm-btn">Confirm Enable</button>
+                    </form></div></div></div>
         <script>
         var SERVER_ONLINE={str(not offline).lower()};
-        function openRemoveModal(btn){{var d=btn.dataset;var thumb=document.getElementById('modal-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('modal-title').textContent=d.title;document.getElementById('modal-id').textContent='Workshop ID '+d.modId;document.getElementById('modal-desc').textContent=d.description||'(no description)';document.getElementById('modal-mod-id-input').value=d.modId;document.getElementById('modal-title-input').value=d.title;document.getElementById('modal-preview-input').value=d.preview||'';var noteEl=document.getElementById('modal-online-note');var form=document.getElementById('modal-confirm-form');var confirmBtn=document.getElementById('modal-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online. Removing will stop, apply, and restart.';noteEl.style.display='block';form.action='/mods/remove-with-restart';confirmBtn.textContent='Restart & Remove';}}else{{noteEl.style.display='none';form.action='/mods/remove';confirmBtn.textContent='Confirm Remove';}}document.getElementById('modal-backdrop').classList.add('open');}}
+        function openRemoveModal(btn){{var d=btn.dataset;var thumb=document.getElementById('modal-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('modal-title').textContent=d.title;document.getElementById('modal-id').textContent='Workshop ID '+d.modId;document.getElementById('modal-desc').innerHTML=d.description||'(no description)';document.getElementById('modal-mod-id-input').value=d.modId;document.getElementById('modal-title-input').value=d.title;document.getElementById('modal-preview-input').value=d.preview||'';var noteEl=document.getElementById('modal-online-note');var form=document.getElementById('modal-confirm-form');var confirmBtn=document.getElementById('modal-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online. Removing will stop, apply, and restart.';noteEl.style.display='block';form.action='/mods/remove-with-restart';confirmBtn.textContent='Restart & Remove';}}else{{noteEl.style.display='none';form.action='/mods/remove';confirmBtn.textContent='Confirm Remove';}}document.getElementById('modal-backdrop').classList.add('open');}}
         function closeRemoveModal(){{document.getElementById('modal-backdrop').classList.remove('open');}}
-        function openDetailModal(btn){{var d=btn.dataset;var thumb=document.getElementById('detail-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('detail-title').textContent=d.title;document.getElementById('detail-meta').textContent='Workshop ID '+d.modId;document.getElementById('detail-desc').textContent=d.description||'(no description)';document.getElementById('detail-modal-backdrop').classList.add('open');}}
+        function openDetailModal(btn){{var d=btn.dataset;var thumb=document.getElementById('detail-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('detail-title').textContent=d.title;document.getElementById('detail-meta').textContent='Workshop ID '+d.modId;document.getElementById('detail-desc').innerHTML=d.description||'(no description)';document.getElementById('detail-modal-backdrop').classList.add('open');}}
         function closeDetailModal(){{document.getElementById('detail-modal-backdrop').classList.remove('open');}}
         function openReaddModal(btn){{var d=btn.dataset;var thumb=document.getElementById('readd-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('readd-title').textContent=d.title;document.getElementById('readd-id').textContent='Workshop ID '+d.modId;document.getElementById('readd-mod-id-input').value=d.modId;var noteEl=document.getElementById('readd-online-note');var form=document.getElementById('readd-confirm-form');var confirmBtn=document.getElementById('readd-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online. Re-adding will stop, apply, and restart.';noteEl.style.display='block';form.action='/mods/readd-with-restart';confirmBtn.textContent='Restart & Re-add';}}else{{noteEl.style.display='none';form.action='/mods/readd';confirmBtn.textContent='Confirm Re-add';}}document.getElementById('readd-modal-backdrop').classList.add('open');}}
         function closeReaddModal(){{document.getElementById('readd-modal-backdrop').classList.remove('open');}}
-        document.addEventListener('keydown',function(e){{if(e.key==='Escape'){{closeRemoveModal();closeDetailModal();closeReaddModal();}}}});
+        document.addEventListener('keydown',function(e){{if(e.key==='Escape'){{closeRemoveModal();closeDetailModal();closeReaddModal();closeEnableModal();}}}});
         function deletePreviouslyRemoved(modId,btn){{if(!confirm('Remove "'+modId+'" from the previously-removed list?'))return;btn.disabled=true;btn.textContent='Removing\u2026';fetch('/mods/removed/delete',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'mod_id='+encodeURIComponent(modId)}}).then(function(r){{return r.json();}}).then(function(data){{if(data.ok){{var row=btn.closest('tr');if(row)row.remove();}}else{{btn.disabled=false;btn.textContent='Remove from list';alert('Failed: '+(data.error||'unknown error'));}}}}).catch(function(err){{btn.disabled=false;btn.textContent='Remove from list';alert('Request failed: '+err);}});}}
+        function cancelPendingMod(modId,kind,btn){{var label=(kind==='mods_enable'?'enabling':'addition');if(!confirm('Cancel queued '+label+' for "'+modId+'"?'))return;btn.disabled=true;btn.textContent='Cancelling\u2026';fetch('/mods/pending/cancel',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'mod_id='+encodeURIComponent(modId)+'&kind='+encodeURIComponent(kind)}}).then(function(r){{return r.json();}}).then(function(data){{if(data.ok){{var row=btn.closest('tr');if(row)row.remove();}}else{{btn.disabled=false;btn.textContent='Cancel';alert('Failed: '+(data.error||'unknown error'));}}}}).catch(function(err){{btn.disabled=false;btn.textContent='Cancel';alert('Request failed: '+err);}});}}
+        function openEnableModal(btn){{var d=btn.dataset;var thumb=document.getElementById('enable-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('enable-title').textContent=d.title;var ids=[];try{{ids=JSON.parse(d.internalIds||'[]');}}catch(e){{ids=[];}}document.getElementById('enable-meta').textContent='Workshop ID '+d.modId+' \u00b7 Internal ID'+(ids.length>1?'s':'')+': '+ids.join(', ');document.getElementById('enable-mod-id-input').value=d.modId;document.getElementById('enable-title-input').value=d.title;document.getElementById('enable-preview-input').value=d.preview||'';document.getElementById('enable-ids-input').value=d.internalIds||'[]';buildEnablePicker(d.internalDetails);var noteEl=document.getElementById('enable-online-note');var form=document.getElementById('enable-confirm-form');var confirmBtn=document.getElementById('enable-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online -- this will be queued and applied at the next restart.';noteEl.style.display='block';form.action='/mods/enable/queue';confirmBtn.textContent='Queue for Next Restart';}}else{{noteEl.style.display='none';form.action='/mods/enable';confirmBtn.textContent='Confirm Enable';}}document.getElementById('enable-modal-backdrop').classList.add('open');}}
+        function closeEnableModal(){{document.getElementById('enable-modal-backdrop').classList.remove('open');}}
+        function buildEnablePicker(raw){{var box=document.getElementById('enable-picker');var hint=document.getElementById('enable-picker-hint');box.innerHTML='';var det=[];try{{det=JSON.parse(raw||'[]');}}catch(e){{det=[];}}if(det.length<2){{box.style.display='none';hint.style.display='none';return;}}det.forEach(function(m){{var lab=document.createElement('label');lab.className='checkbox-item';var cb=document.createElement('input');cb.type='checkbox';cb.value=m.id;cb.checked=!m.enabled;if(m.enabled)cb.disabled=true;var span=document.createElement('span');span.textContent=(m.name&&m.name!==m.id?m.name+' ':'')+'('+m.id+')'+(m.enabled?' -- already enabled':'');lab.appendChild(cb);lab.appendChild(span);box.appendChild(lab);}});box.style.display='block';hint.style.display='block';}}
+        function submitEnableForm(){{var box=document.getElementById('enable-picker');if(box.style.display==='none')return true;var picked=[];box.querySelectorAll('input[type=checkbox]:checked:not(:disabled)').forEach(function(cb){{picked.push(cb.value);}});if(!picked.length){{alert('Tick at least one mod to enable.');return false;}}document.getElementById('enable-ids-input').value=JSON.stringify(picked);return true;}}
         </script>"""
 
-    body = f"{banner_html}{list_html}{add_mod_html}{removed_html}{modal_html}{reorder_script}"
+    body = f"{banner_html}{list_html}{add_mod_html}{pending_html}{removed_html}{modal_html}{reorder_script}"
     return _page("PZ Panel &mdash; Mods", "mods", body)
 
 
@@ -572,6 +645,7 @@ def add_mod_page(request: Request, lookup: str = ""):
     msg = request.query_params.get("msg")
     msg_type = request.query_params.get("msg_type", "error")
     banner_html = f'<p class="banner {msg_type}">{html.escape(msg)}</p>' if msg else ""
+    offline = get_server_state() == "offline"
     if lookup:
         if not lookup.isdigit():
             preview_html = '<p style="color:var(--rust);">Workshop ID must be numeric.</p>'
@@ -588,6 +662,10 @@ def add_mod_page(request: Request, lookup: str = ""):
                     description = (info.get("description") or "").strip()
                     desc_snippet = description[:400]
                     ellipsis = "\u2026" if len(description) > 400 else ""
+                    if offline:
+                        action_url, btn_label = "/mods/add/confirm", "Confirm Add"
+                    else:
+                        action_url, btn_label = "/mods/add/queue", "Queue for Next Restart"
                     preview_html = f"""
                         <div class="preview">
                             {_thumb_html(info.get('preview_url'), 'thumb-lg')}
@@ -597,15 +675,19 @@ def add_mod_page(request: Request, lookup: str = ""):
                             </div>
                         </div>
                         <p class="note" style="border-top:none;margin-top:0;padding-top:0;">
-                            {html.escape(desc_snippet)}{ellipsis}
+                            {_render_bbcode(desc_snippet)}{ellipsis}
                         </p>
-                        <form method="post" action="/mods/add/confirm">
+                        <form method="post" action="{action_url}">
                             <input type="hidden" name="mod_id" value="{lookup}">
-                            <button type="submit" class="btn primary">Confirm Add</button>
+                            <input type="hidden" name="title" value="{html.escape(info['title'], quote=True)}">
+                            <input type="hidden" name="preview_url" value="{html.escape(info.get('preview_url') or '', quote=True)}">
+                            <button type="submit" class="btn primary">{btn_label}</button>
                         </form>
                     """
-    offline = get_server_state() == "offline"
-    warn_html = "" if offline else '<p class="banner error">Server must be stopped before adding a mod.</p>'
+    warn_html = ("" if offline else
+                 '<p class="banner" style="border-color:var(--amber);color:var(--amber);">'
+                 'Server is online -- this mod will be queued and added to WorkshopItems '
+                 'automatically at the next server start or restart.</p>')
     body = f"""
         {banner_html}
         <form method="get" action="/mods/add" class="lookup-form">
@@ -630,9 +712,70 @@ def add_mod_confirm(mod_id: str = Form(...)):
         qs = urllib.parse.urlencode({"msg": str(e), "msg_type": "error"})
         return RedirectResponse(f"/mods?{qs}", status_code=303)
     removed_mods.clear_removed(mod_id)
+    pending_mods.cancel_pending(mod_id)
     msg = "Added to WorkshopItems" if added else "Already in WorkshopItems"
     qs = urllib.parse.urlencode({"msg": msg})
     return RedirectResponse(f"/mods?{qs}", status_code=303)
+
+
+@app.post("/mods/add/queue")
+def add_mod_queue(mod_id: str = Form(...), title: str = Form(""), preview_url: str = Form("")):
+    pending_mods.queue_workshop_add(mod_id, title or mod_id, preview_url or None)
+    log_action("panel", "queue-mod-addition",
+              f"manual (panel) -- queued {title or mod_id} for next restart")
+    qs = urllib.parse.urlencode({"msg": "Queued -- will be added to WorkshopItems at the next server start or restart"})
+    return RedirectResponse(f"/mods?{qs}", status_code=303)
+
+
+@app.post("/mods/enable")
+def enable_mod_confirm(mod_id: str = Form(...), internal_ids: str = Form("[]")):
+    if get_server_state() != "offline":
+        qs = urllib.parse.urlencode({"msg": "Server must be stopped first", "msg_type": "error"})
+        return RedirectResponse(f"/mods?{qs}", status_code=303)
+    try:
+        ids = json.loads(internal_ids)
+    except (ValueError, TypeError):
+        ids = []
+    if not ids:
+        qs = urllib.parse.urlencode({"msg": "No internal mod ID(s) found for that Workshop item -- nothing to enable", "msg_type": "error"})
+        return RedirectResponse(f"/mods?{qs}", status_code=303)
+    try:
+        added = add_mods_line_items(ids)
+    except ModCheckError as e:
+        qs = urllib.parse.urlencode({"msg": str(e), "msg_type": "error"})
+        return RedirectResponse(f"/mods?{qs}", status_code=303)
+    pending_mods.cancel_pending(mod_id, kind="mods_enable")
+    log_action("panel", "enable-mod", f"manual (panel) -- added {', '.join(added) or '(none, already present)'} to Mods=")
+    msg = f"Enabled -- added {', '.join(added)} to Mods=" if added else "Already enabled"
+    qs = urllib.parse.urlencode({"msg": msg})
+    return RedirectResponse(f"/mods?{qs}", status_code=303)
+
+
+@app.post("/mods/enable/queue")
+def enable_mod_queue(mod_id: str = Form(...), title: str = Form(""), preview_url: str = Form(""), internal_ids: str = Form("[]")):
+    try:
+        ids = json.loads(internal_ids)
+    except (ValueError, TypeError):
+        ids = []
+    if not ids:
+        qs = urllib.parse.urlencode({"msg": "No internal mod ID(s) found for that Workshop item -- nothing to queue", "msg_type": "error"})
+        return RedirectResponse(f"/mods?{qs}", status_code=303)
+    pending_mods.queue_mods_enable(mod_id, title or mod_id, preview_url or None, ids)
+    log_action("panel", "queue-mod-enable",
+              f"manual (panel) -- queued enabling {title or mod_id} for next restart")
+    qs = urllib.parse.urlencode({"msg": "Queued -- will be enabled (added to Mods=) at the next server start or restart"})
+    return RedirectResponse(f"/mods?{qs}", status_code=303)
+
+
+@app.post("/mods/pending/cancel")
+def cancel_pending_mod(mod_id: str = Form(...), kind: str = Form("workshop_add")):
+    try:
+        pending_mods.cancel_pending(mod_id, kind=kind)
+        log_action("panel", "cancel-pending-mod", f"manual (panel) -- cancelled queued {kind} for {mod_id}")
+        return {"ok": True}
+    except Exception as e:
+        log.exception("Failed to cancel pending %s for %s", kind, mod_id)
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/mods/remove")
@@ -899,26 +1042,54 @@ def killboard_page():
     return _page("PZ Panel &mdash; Killboard", "killboard", body)
 
 
-async def _tail_file_events(path, request=None, poll_interval=0.5, initial_lines=200):
+async def _tail_file_events(resolve_path, request=None, poll_interval=0.5, initial_lines=200):
+    """
+    resolve_path: a fixed path string, OR a zero-arg callable returning
+    the current path to tail. The callable form is re-invoked every
+    poll cycle -- needed for Logs/ kind files, which get a brand new
+    dated filename each server session rather than being rotated in
+    place like the main console log (inode-change detection alone
+    wouldn't notice a differently-named file appearing).
+    """
+    def _resolve():
+        return resolve_path() if callable(resolve_path) else resolve_path
+
+    path = _resolve()
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f.readlines()[-initial_lines:]:
-                yield line
+        if path:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f.readlines()[-initial_lines:]:
+                    yield line
     except FileNotFoundError:
         yield f"[pzpanel] {path} does not exist yet -- waiting for it to appear\n"
+
     last_inode = None
     last_pos = 0
-    try:
-        last_inode = pc.file_identity(path)
-        last_pos = os.stat(path).st_size
-    except FileNotFoundError:
-        pass
+    if path:
+        try:
+            last_inode = pc.file_identity(path)
+            last_pos = os.stat(path).st_size
+        except FileNotFoundError:
+            pass
+
     while True:
         if _shutting_down.is_set():
             return
         if request is not None and await request.is_disconnected():
             return
         await asyncio.sleep(poll_interval)
+
+        new_path = _resolve()
+        if new_path != path:
+            path = new_path
+            last_pos = 0
+            last_inode = None
+            yield f"[pzpanel] --- switched to {path or '(none)'} ---\n"
+            if not path:
+                continue
+
+        if not path:
+            continue
         try:
             st = os.stat(path)
         except FileNotFoundError:
@@ -940,10 +1111,31 @@ async def _tail_file_events(path, request=None, poll_interval=0.5, initial_lines
 
 
 @app.get("/console", response_class=HTMLResponse)
-def console_page():
-    path = load_console_log_path()
+def console_page(log: str = "console"):
+    available = list_available_logs()
+    kinds = {e["kind"] for e in available}
+    if log not in kinds:
+        log = "console"
+    current_entry = next((e for e in available if e["kind"] == log), None)
+    path = current_entry["path"] if current_entry else None
+
+    tab_style = ("display:inline-block;padding:.35rem .7rem;margin:0 .4rem .5rem 0;"
+                 "font-family:'JetBrains Mono',monospace;font-size:.72rem;"
+                 "letter-spacing:.04em;text-transform:uppercase;border-radius:2px;"
+                 "border:1px solid var(--line);text-decoration:none;")
+    tabs = []
+    for e in available:
+        if e["kind"] == log:
+            tabs.append(f'<span style="{tab_style}background:var(--amber-dim);'
+                        f'border-color:var(--amber);color:#fff3dc;">{html.escape(e["kind"])}</span>')
+        else:
+            tabs.append(f'<a href="/console?log={urllib.parse.quote(e["kind"])}" '
+                        f'style="{tab_style}color:var(--ink-dim);">{html.escape(e["kind"])}</a>')
+    tabs_html = f'<div style="margin-bottom:.75rem;">{"".join(tabs)}</div>'
+
     body = f"""
-        <p class="console-path">{html.escape(path or '(no console_log configured)')}</p>
+        {tabs_html}
+        <p class="console-path">{html.escape(path or '(no log file for this selection)')}</p>
         <div class="console-toolbar">
             <input type="text" id="filter-input" class="input" placeholder="Filter (client-side)" oninput="renderConsole()">
             <button type="button" class="btn" id="pause-btn" onclick="toggleConsolePause()">Pause</button>
@@ -959,7 +1151,7 @@ def console_page():
             function escapeHtml(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
             function colorizeLine(line){{var escaped=escapeHtml(line);if(escaped.indexOf('*** SERVER STARTED')!==-1){{return '<span class="lvl-server-started">'+escaped+'</span>';}}if(/Steam client \\d+ is initiating a connection/.test(line)){{return '<span class="lvl-steam-connect">'+escaped+'</span>';}}var m=line.match(/^(ERROR|WARN|LOG)/);if(!m)return escaped;var level=m[1];var cls=level==='ERROR'?'lvl-error':level==='WARN'?'lvl-warn':'lvl-log';var idx=escaped.indexOf(level);if(idx===-1)return escaped;return escaped.slice(0,idx)+'<span class="'+cls+'">'+level+'</span>'+escaped.slice(idx+level.length);}}
             function appendLine(line){{var div=document.createElement('div');div.innerHTML=colorizeLine(line);output.appendChild(div);while(output.childElementCount>MAX_LINES){{output.removeChild(output.firstChild);}}if(atBottom)output.scrollTop=output.scrollHeight;}}
-            var source=new EventSource('/console/stream');
+            var source=new EventSource('/console/stream?log={urllib.parse.quote(log)}');
             source.onmessage=function(e){{buffer.push(e.data);if(buffer.length>MAX_LINES)buffer.shift();if(paused)return;var filter=filterEl.value.toLowerCase();if(!filter||e.data.toLowerCase().indexOf(filter)!==-1){{appendLine(e.data);}}}}
             source.onerror=function(){{statusEl.textContent='\u25CF DISCONNECTED';statusEl.style.color='var(--rust)';}}
             window.renderConsole=function(){{var filter=filterEl.value.toLowerCase();var lines=filter?buffer.filter(function(l){{return l.toLowerCase().indexOf(filter)!==-1;}}):buffer;output.innerHTML='';var frag=document.createDocumentFragment();lines.forEach(function(l){{var div=document.createElement('div');div.innerHTML=colorizeLine(l);frag.appendChild(div);}});output.appendChild(frag);if(atBottom)output.scrollTop=output.scrollHeight;}}
@@ -972,15 +1164,17 @@ def console_page():
 
 
 @app.get("/console/stream")
-async def console_stream(request: Request):
-    path = load_console_log_path()
+async def console_stream(request: Request, log: str = "console"):
+    def resolve():
+        return resolve_log_path(log)
+    path = resolve()
     if not path:
         async def empty():
-            yield "data: [pzpanel] console_log not configured\n\n"
+            yield f"data: [pzpanel] no log file found for '{log}'\n\n"
         return StreamingResponse(empty(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     async def event_generator():
-        async for line in _tail_file_events(path, request=request):
+        async for line in _tail_file_events(resolve, request=request):
             safe = line.rstrip("\n").replace("\r", "")
             yield f"data: {safe}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream",
