@@ -13,7 +13,7 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "4.6.4"
+__version__ = "5.0.0"
 
 import asyncio
 import html
@@ -42,7 +42,6 @@ import removed_mods
 import pending_mods
 import discord_module
 from discord_module import _fmt_ingame_time
-import player_db as pdb
 import platform_compat as pc
 
 from server_config import (
@@ -943,102 +942,57 @@ def killboard_page():
     if _player_event_watcher is None:
         body = '<p class="note">Player-event tracking isn\'t running -- check that pzpanel.ini was readable at startup.</p>'
         return _page("PZ Panel &mdash; Killboard", "killboard", body)
-    db = _player_event_watcher.db
-    if db is not None:
-        accounts = db.get_killboard()
-        if not accounts:
-            table_html = '<p class="note">No player data yet -- waiting for the first connection to be recorded.</p>'
-        else:
-            # Players table
-            player_rows = []
-            for acc in accounts:
-                steamid = acc["steamid"]
-                steam_name = html.escape(acc["steam_name"] or steamid)
-                profile_url = f"https://steamcommunity.com/profiles/{steamid}"
-                avatar_html = ""
-                if acc.get("avatar_url"):
-                    avatar_html = (f'<img src="{html.escape(acc["avatar_url"])}" '
-                                   f'class="thumb" style="vertical-align:middle;margin-right:.5rem;" alt="">')
-                hours_note = ""
-                if acc.get("pz_hours") is not None:
-                    hours_note = f'<span class="readout-sub" style="margin-left:.5rem;font-size:.72rem;">{acc["pz_hours"]:,} hrs in PZ</span>'
-                player_rows.append(f"""<tr>
-                    <td>{avatar_html}<a href="{html.escape(profile_url, quote=True)}"
-                        target="_blank" rel="noopener noreferrer"
-                        class="link-id" style="font-size:1rem;">{steam_name}</a>{hours_note}</td>
-                    <td class="mono">{acc['account_kills']}</td>
-                </tr>""")
-            players_table = f"""<p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Players</p>
-                <table>
-                    <tr><th>Player</th><th>Total kills</th></tr>
-                    {"".join(player_rows)}
-                </table>"""
-            # Characters table
-            char_rows = []
-            for acc in accounts:
-                for c in acc["characters"]:
-                    run_str = str(c["current_run_kills"]) if c["current_run_kills"] else "\u2014"
-                    char_rows.append(f"""<tr>
-                        <td>{html.escape(c['username'])}</td>
-                        <td class="mono">{run_str}</td>
-                        <td class="mono">\u2014</td>
-                    </tr>""")
-            chars_table = f"""<p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Characters</p>
-                <table>
-                    <tr><th>Character</th><th>Kills (current run)</th><th>Time survived (in-game)</th></tr>
-                    {"".join(char_rows)}
-                </table>"""
-            table_html = players_table + chars_table
-        body = f"""
-            {table_html}
-            <p class="note">Lifetime kills accumulate across all characters and runs tracked by PZP.
-            The mod file is rewritten roughly every 60 seconds so live kill counts can lag by up to that long.</p>
-        """
+    players, characters = _player_event_watcher.db.get_killboard()
+    if not players and not characters:
+        body = ('<p class="note">No kill data yet -- it appears once a player with the '
+                'PZP mod connects and their first report arrives.</p>')
         return _page("PZ Panel &mdash; Killboard", "killboard", body)
-    if _player_event_watcher.kills_file is None:
-        body = '<p class="note">No kills_file configured under <code>[player_events]</code> in pzpanel.ini.</p>'
-        return _page("PZ Panel &mdash; Killboard", "killboard", body)
-    st = _player_event_watcher.state.data
-    current = st.get("kills_current_run", {})
-    lifetime = st.get("kills_lifetime", {})
-    hours = st.get("hours_current_run", {})
-    logins = st.get("logins", {})  # username -> steamid
-    last_updated = st.get("kills_last_updated")
-    names = sorted(set(current) | set(lifetime), key=lambda n: current.get(n, 0), reverse=True)
-    if not names:
-        table_html = '<p class="note">No kill data yet.</p>'
-    else:
-        # Players section: group lifetime kills by steamid where known, else by username
-        seen_steamids = {}
-        player_totals = {}  # display_key -> {name, total}
-        for n in names:
-            sid = logins.get(n)
-            key = sid or n
-            if key not in player_totals:
-                player_totals[key] = {"name": n, "total": 0}
-            player_totals[key]["total"] += lifetime.get(n, 0)
-        player_rows = []
-        for key, p in sorted(player_totals.items(), key=lambda x: x[1]["total"], reverse=True):
-            player_rows.append(f"""<tr><td>{html.escape(p['name'])}</td><td class="mono">{p['total']}</td></tr>""")
-        players_table = f"""<p class="eyebrow" style="margin:0 0 .6rem;letter-spacing:.06em;">Players</p>
-            <table>
-                <tr><th>Player</th><th>Total kills</th></tr>
-                {"".join(player_rows)}
-            </table>"""
-        # Characters section
-        char_rows = []
-        for n in names:
-            ingame = _fmt_ingame_time(hours.get(n))
-            time_cell = html.escape(ingame) if ingame else "\u2014"
-            char_rows.append(f"""<tr><td>{html.escape(n)}</td><td class="mono">{current.get(n, '\u2014')}</td><td class="mono">{time_cell}</td></tr>""")
-        chars_table = f"""<p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Characters</p>
-            <table>
-                <tr><th>Character</th><th>Kills (current run)</th><th>Time survived (in-game)</th></tr>
-                {"".join(char_rows)}
-            </table>"""
-        table_html = players_table + chars_table
-    updated_note = f'Last updated {_fmt_ts(last_updated)}.' if last_updated else 'Not yet updated.'
-    body = f"{table_html}<p class=\"note\">(In-memory fallback.) {updated_note}</p>"
+
+    player_rows = []
+    for p in players:
+        avatar_html = ""
+        if p["avatar_url"]:
+            avatar_html = (f'<img src="{html.escape(p["avatar_url"], quote=True)}" '
+                           f'class="thumb" style="display:inline-block;vertical-align:middle;margin-right:.5rem;" alt="">')
+        profile_url = p["profile_url"] or f"https://steamcommunity.com/profiles/{p['steamid']}"
+        accounts = ", ".join(html.escape(a) for a in p["accounts"]) or "—"
+        player_rows.append(f"""<tr>
+            <td>{avatar_html}<a href="{html.escape(profile_url, quote=True)}" target="_blank"
+                rel="noopener noreferrer" class="link-id" style="font-size:1rem;">{html.escape(p['name'])}</a></td>
+            <td>{accounts}</td>
+            <td class="mono">{p['kills']:,}</td>
+            <td class="mono">{html.escape(discord_module.fmt_total_time(p['total_seconds']))}</td>
+        </tr>""")
+
+    dash = "—"
+    char_rows = []
+    for c in characters:
+        status = ('<span class="tag ok">Alive</span>' if c["alive"]
+                  else '<span class="tag muted">Dead</span>')
+        survived = _fmt_ingame_time(c["hours"]) or "—"
+        char_rows.append(f"""<tr>
+            <td>{html.escape(c['name'] or dash)}</td>
+            <td>{html.escape(c['username'])}</td>
+            <td>{html.escape(c['persona'] or dash)}</td>
+            <td class="mono">{c['kills']:,}</td>
+            <td class="mono">{html.escape(survived)}</td>
+            <td>{status}</td>
+        </tr>""")
+
+    body = f"""
+        <p class="eyebrow" style="margin:0 0 .6rem;letter-spacing:.06em;">Players</p>
+        <table>
+            <tr><th>Player</th><th>Accounts</th><th>Total kills</th><th>Time on server</th></tr>
+            {"".join(player_rows)}
+        </table>
+        <p class="eyebrow" style="margin:1.5rem 0 .6rem;letter-spacing:.06em;">Characters</p>
+        <table>
+            <tr><th>Character</th><th>Account</th><th>Player</th><th>Kills</th><th>Survived (in-game)</th><th>Status</th></tr>
+            {"".join(char_rows)}
+        </table>
+        <p class="note">Kills come from the PZP mod, which reports every 15 seconds while a
+        character is killing and once on death, so live counts can lag slightly.</p>
+    """
     return _page("PZ Panel &mdash; Killboard", "killboard", body)
 
 

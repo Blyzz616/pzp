@@ -5,7 +5,7 @@ Extracted from main.py (v4.2.2) to keep the FastAPI app file focused on routes.
 All functions here are pure utility — no FastAPI imports, no app object.
 """
 
-__version__ = "4.6.4"
+__version__ = "5.0.0"
 
 import configparser
 import os
@@ -529,16 +529,13 @@ SETTINGS_GROUPS = [
                 <button type="submit" class="btn primary" style="font-size:.72rem;padding:.45rem .9rem;">+ Add to Mods</button>
             </form>
         </div>
-        <p style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--ink-dim);margin:0 0 .75rem;">The mod writes a kill-count file the panel reads every poll interval. Install it on your server, set <code>kills_file</code> below, restart the panel, and the Killboard tab goes live.</p>""",
+        <p style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--ink-dim);margin:0 0 .75rem;">The mod appends kill reports to <code>Zomboid/Lua/pzp_events.log</code>; the panel reads them every poll interval into its own database. Install the mod on your server and restart the panel. Both paths below default sensibly and only need setting if yours differ.</p>""",
         "fields": [
-            {"section": "player_events", "key": "kills_file", "label": "Kills File Path", "type": "text",
-             "help": "Path to pzp_player_kills.txt written by the PZP mod."},
-            {"section": "player_events", "key": "player_db", "label": "Player DB Path", "type": "text",
-             "help": "SQLite database for persistent player/kill tracking."},
-            {"section": "player_events", "key": "state_file", "label": "Player-Event State File", "type": "text"},
+            {"section": "player_events", "key": "event_log", "label": "Mod Event Log", "type": "text",
+             "help": "pzp_events.log written by the PZP mod. Default: Lua/pzp_events.log next to the console log."},
+            {"section": "player_events", "key": "kills_db", "label": "Kills Database", "type": "text",
+             "help": "SQLite database for players, characters and kills. Default: pzp_kills.sqlite in the panel's data directory."},
             {"section": "player_events", "key": "poll_interval", "label": "Poll Interval (sec)", "type": "number"},
-            {"section": "player_events", "key": "respawn_window", "label": "Respawn Window (sec)", "type": "number",
-             "help": "A death followed by a rejoin within this many seconds counts as a respawn, not a new connection."},
             {"section": "player_events", "key": "logs_dir", "label": "Logs Dir Override", "type": "text",
              "help": "Override the Logs/ directory location if it's not alongside console_log."},
         ],

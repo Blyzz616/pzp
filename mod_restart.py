@@ -13,7 +13,7 @@ controls whether a check cycle starts at all, not an already-running
 countdown.
 """
 
-__version__ = "4.6.4"
+__version__ = "5.0.0"
 
 import configparser
 import os

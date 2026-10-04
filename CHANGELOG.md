@@ -9,6 +9,89 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.0.0] - 2026-10-04
+
+Kill tracking rebuilt end to end. **The `pzp` Workshop mod changed and
+must be re-uploaded** (from `pzp/42/`); players get it when the server
+restarts with the new version.
+
+### Why
+
+The published mod was a mix of two versions: the newer client sent
+kills, hours and Steam ID, but the older server script threw the extra
+data away and overwrote `pzp_player_kills.txt` with `account|kills`.
+The panel was reading `pzp_events.log`, which nothing wrote, so every
+kill number in Discord and on the Killboard came from data last updated
+in September. Deaths were never reported by the mod at all (the
+`PlayerDied` command existed but was never sent); the panel guessed them
+from the console log and slept 1.5 s hoping the data would catch up.
+
+### Changed — Workshop mod (`pzp/42/`, now the only copy)
+
+- Client reports on character load/creation, every 15 s while the kill
+  count is changing (heartbeat every 5 min otherwise), and once on death
+  with the exact final count. Each report carries kills, in-game hours
+  survived and the character's name.
+- Server script appends `v2|J/U/D|account|kills|hours|character name`
+  to `Zomboid/Lua/pzp_events.log` (opened create + append; the previous
+  unpublished version opened it in overwrite mode). The account name
+  comes from the server's player object, not the client.
+- `mod.info` pointed at `pzp.png` / `pzpIcon.png`; now `poster.png` /
+  `icon.png`, the files that exist.
+- Removed the stray `pzp_Client.lua` / `pzp_Server.lua` copies in the
+  repo root.
+
+### Changed — panel
+
+- New store `player_db.py` (`pzp_kills.sqlite`): personas (Steam ID) →
+  accounts → characters, plus open sessions. Kill totals are sums over
+  characters. Starts empty — nothing is imported from the old YAML,
+  `.txt` or `player_db.sqlite` files, which are left in place unused.
+- `kill_tracker.py` rewritten: tails the event log with its read
+  position stored in the database (reports written while the panel is
+  down are processed when it starts), truncates the log once fully read
+  and over 512 KB.
+- A death report closes the character; the next report from that
+  account starts a new one. If a death report is lost, a drop in in-game
+  hours or a different character name starts the new character anyway.
+  A repeated death report is ignored.
+- Session kills = the starting character's kills since join (to death
+  or disconnect) + kills of every character created during the session.
+  Sessions and total time on server are stored in the database, so they
+  survive panel restarts.
+- Kill milestones (per character and per player) post once, for the
+  highest threshold crossed between two reports (98 → 103 posts 100).
+- Join/disconnect handlers process pending mod reports first, so they
+  see current counts.
+- A failing join/disconnect handler is logged instead of stopping the
+  log watcher.
+- Killboard page rebuilt: players (accounts, total kills, time on
+  server) and characters (account, kills, in-game time survived,
+  alive/dead).
+- Settings / `pzpanel.ini`: `[player_events]` now uses `event_log`
+  (default `Lua/pzp_events.log` beside the console log) and `kills_db`
+  (default `pzp_kills.sqlite` in the data dir). `kills_file`,
+  `player_db`, `state_file` and `respawn_window` are no longer used.
+
+### Changed — Discord embeds
+
+- **Join:** "New connection:", Steam profile link, player's total
+  kills, Hours on Record, "Logging in as **account**", then side by side
+  the account's kills and "Kills this run so far" (living character, or
+  0), then "*persona* has also played:" with the two most recent other
+  games (hours on record, last played). Avatar thumbnail.
+- **Disconnect:** "*persona* has disconnected", online time this
+  session, total time on server (`1d 1h` plus `(25 hours)` from a day
+  up), kills this session. Posted as "*persona* Rage-quit" with a random
+  message when a character died this session and no new one was made.
+- **Death:** "*character name* died" (account name if the name is
+  unavailable), a random death message, kills this run, in-game time
+  survived, avatar. Driven by the mod's death report instead of the
+  console log.
+- Removed the "Respawn notice" embed (rejoining after a death now posts
+  a normal join).
+- Milestone titles say "1 kill", not "1 kills".
+
 ## [4.6.4] - 2026-10-04
 
 ### Fixed

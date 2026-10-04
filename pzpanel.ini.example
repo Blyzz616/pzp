@@ -67,27 +67,22 @@ windows_mode = sc
 # Settings for join/leave/death tracking and the /killboard page.
 # Omit entirely for sane defaults.
 
-# Linux default:   /opt/pzp/player_events_state.json
-# Windows default: %LOCALAPPDATA%\pzpanel\player_events_state.json
-# state_file =
-
-# Linux default:   /opt/pzp/player_db.sqlite
-# Windows default: %LOCALAPPDATA%\pzpanel\player_db.sqlite
-# player_db =
-
 # How often (seconds) the watcher polls log files.
 poll_interval = 0.5
-
-# A death followed by a rejoin within this many seconds is a respawn, not a new connection.
-respawn_window = 600
 
 # Override Logs/ directory location if it's not alongside console_log.
 # logs_dir =
 
-# Path to the PZP Zomboid mod's kill-count file (Workshop ID 3793020885).
-# Linux example:   kills_file = /home/pzserver/Zomboid/Lua/pzp_player_kills.txt
-# Windows example: kills_file = C:\Users\YourName\Zomboid\Lua\pzp_player_kills.txt
-# kills_file =
+# Event log written by the PZP Zomboid mod (Workshop ID 3793020885).
+# Default: Lua/pzp_events.log in the same folder as console_log.
+# Linux example:   event_log = /home/pzserver/Zomboid/Lua/pzp_events.log
+# Windows example: event_log = C:\Users\YourName\Zomboid\Lua\pzp_events.log
+# event_log =
+
+# Database for players, characters, kills and time on server.
+# Linux default:   /opt/pzp/pzp_kills.sqlite
+# Windows default: %LOCALAPPDATA%\pzpanel\pzp_kills.sqlite
+# kills_db =
 
 [steam]
 # Optional -- enriches join embeds with persona name, avatar, and (with

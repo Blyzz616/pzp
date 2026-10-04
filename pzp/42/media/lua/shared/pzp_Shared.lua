@@ -1,8 +1,10 @@
+-- pzp kill tracker v5.0.0 (companion mod for PZ Panel)
 pzp = pzp or {}
 
 pzp.Module = "pzp"
 
 pzp.Commands = {
-    UpdateKills = "UpdateKills",
-    PlayerDied = "PlayerDied"
+    Snapshot    = "Snapshot",     -- character loaded or created
+    UpdateKills = "UpdateKills",  -- periodic update
+    PlayerDied  = "PlayerDied"    -- character died (exact final count)
 }

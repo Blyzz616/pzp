@@ -1,4 +1,4 @@
-# PZ Panel &nbsp;·&nbsp; v4.6.4
+# PZ Panel &nbsp;·&nbsp; v5.0.0
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
 
@@ -20,7 +20,7 @@ A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage
 - **Status page** — start, stop, restart with live status indicator
 - **Config page** — edit server `.ini` settings directly from the browser (collapsible sections, cascading PVP/chat/safehouse toggles)
 - **Mod Manifest** — see all Workshop mods, update status, drag-to-reorder, add/remove with optional live-server restart. Add/Enable while the server's online queues the change for the next restart instead of forcing a stop. Surfaces when a mod's been downloaded (`WorkshopItems=`) but not yet loaded (`Mods=`) and offers a one-click Enable, closing the most common "I added a mod and it's not working" gap. Workshop items that bundle several mods get a checkbox picker so you choose which internal IDs go into `Mods=`
-- **Killboard** — per-player kill tracking (current run + lifetime), backed by a companion PZ Lua mod
+- **Killboard** — kills per Steam player, per account and per character (alive or dead), plus real time on the server, backed by a companion PZ Lua mod
 - **Console** — live streaming log view with filter and pause; switch between the main console log and any other log currently present in `Logs/` (connections, user, chat, cmd, PerkLog, etc.)
 - **Log** — action history for everything the panel touches
 - **Settings** — grouped, collapsible settings page with Linux/Windows platform toggle
@@ -108,7 +108,9 @@ The Killboard page requires the companion Lua mod installed on your server:
 **Workshop ID:** [3793020885](https://steamcommunity.com/sharedfiles/filedetails/?id=3793020885)  
 **Mod ID:** `pzp`
 
-Once installed, set `kills_file` in `pzpanel.ini` under `[player_events]` to point at the mod's output file (`pzp_player_kills.txt` in your server's Zomboid data directory), then restart the panel.
+Add it to the server's Mods/WorkshopItems and restart the server. The mod appends each character's kill count and in-game time survived to `Zomboid/Lua/pzp_events.log` (on load or creation, every 15 seconds while the count is changing, and on death). The panel reads that file into its own database (`pzp_kills.sqlite` in the panel's data directory). Both paths have defaults; override them with `event_log` / `kills_db` under `[player_events]` only if yours differ.
+
+Kills are tracked per character and summed per account and per Steam player. A Steam player can use several server accounts; each account has at most one living character and any number of dead ones. Tracking starts from the first report the mod sends. Nothing is imported from older versions.
 
 ---
 
@@ -121,7 +123,13 @@ Create a webhook in your Discord server (Server Settings → Integrations → We
 webhook_url = https://discord.com/api/webhooks/...
 ```
 
-Restart the panel for it to take effect. The panel posts embeds on player join/leave/death and server up/down events.
+Restart the panel for it to take effect. The panel posts embeds for:
+
+- **Server up / down**
+- **Join** — Steam profile link and avatar, the player's total kills, PZ hours on record, the account logging in with its kills and its living character's kills, and the two most recent other games played (needs `[steam]` with an API key for hours/games)
+- **Disconnect** — real time online this session, total time on the server, and kills this session (from joining to leaving, across any characters that died in between). If the player's character died and they left before making a new one, it's posted as a rage-quit
+- **Death** — character name (or account name), kills this run, in-game time survived
+- **Kill milestones** — per character and per player, each posted once when crossed
 
 ---
 
@@ -138,7 +146,7 @@ There is currently no built-in authentication - do not do this.
 ├── main.py                  # FastAPI app — all pages and routes
 ├── platform_compat.py       # OS abstraction (Linux/Windows)
 ├── discord_module.py        # Player-event watcher + Discord embeds
-├── player_db.py             # SQLite kill/session tracking
+├── player_db.py             # SQLite store: players, accounts, characters, sessions
 ├── mod_restart.py           # Mod-update watchdog
 ├── ini_safe.py              # Backup + atomic writes for realm.ini
 ├── modcheck.py              # Workshop update checks (WorkshopItems=/Mods=)
@@ -154,11 +162,12 @@ There is currently no built-in authentication - do not do this.
 ├── server_config.py         # Config loading, server control, INI helpers
 ├── ui_helpers.py            # HTML rendering helpers
 ├── discord_webhook.py       # Shared Discord webhook client
-├── kill_tracker.py          # Kill-count data processor (pzp_Server.lua companion)
+├── kill_tracker.py          # Reads the mod's event log into player_db, milestones
 ├── pzpanel.ini.example      # Config template
 ├── pzpanel.service          # systemd unit
 ├── pzpanel_windows.bat      # Windows launcher
 └── pzp/
+    ├── 42/                  # Workshop mod (mod.info, media/lua/{client,server,shared})
     └── screens/             # UI screenshots
 ```
 
@@ -166,6 +175,6 @@ There is currently no built-in authentication - do not do this.
 
 ## Version
 
-**v4.6.4** — `requests` added to `requirements.txt` (the panel imports it at startup) and install steps now use `pip install -r requirements.txt` (adds the missing `python-multipart`); v4.6.3: description BBCode repairs truncated/odd markup (`[hr][/hr]`, cut-off `[b]`), adds `[quote]`/`[code]`/`[spoiler]`/`[img]`, and only allows http(s) links; v4.6.2: scrollbars match the dark theme and truncated descriptions no longer show raw `[list]`/`[*]` tags; v4.6.1: every panel edit of the server `.ini` is now backed up (`backups/`, newest 20) and written atomically; the Enable modal shows a checkbox picker (with each mod's `mod.info` name) when a Workshop item bundles more than one internal mod ID, so you pick which go into `Mods=`; "Needs Enable" now triggers only when none of a mod's IDs are enabled, so deliberately skipped placeholder IDs stop nagging.
+**v5.0.0** — major rewrite of kill tracking: the Workshop mod now reports deaths and character names and appends to an event log the panel actually reads; kills are stored per character in a new database and summed per account and player; session kills and time on server survive panel restarts; join/disconnect/rage-quit/death embeds reworked; milestones post once. **Needs a Workshop update of the `pzp` mod.** v4.6.4: `requests` added to `requirements.txt` (the panel imports it at startup) and install steps now use `pip install -r requirements.txt` (adds the missing `python-multipart`); v4.6.3: description BBCode repairs truncated/odd markup (`[hr][/hr]`, cut-off `[b]`), adds `[quote]`/`[code]`/`[spoiler]`/`[img]`, and only allows http(s) links; v4.6.2: scrollbars match the dark theme and truncated descriptions no longer show raw `[list]`/`[*]` tags; v4.6.1: every panel edit of the server `.ini` is now backed up (`backups/`, newest 20) and written atomically; the Enable modal shows a checkbox picker (with each mod's `mod.info` name) when a Workshop item bundles more than one internal mod ID, so you pick which go into `Mods=`; "Needs Enable" now triggers only when none of a mod's IDs are enabled, so deliberately skipped placeholder IDs stop nagging.
 
 See `CHANGELOG.md` for full history.

@@ -1,55 +1,46 @@
 """
-kill_tracker.py — Kill data processor for pzpanel.
+kill_tracker.py -- Feeds the pzp mod's event log into player_db.
 
-Owns the YAML kills file and all kill arithmetic. Tails the Lua event log
-(pzp_events.log) written by pzp_Server.lua and keeps the YAML up to date.
+pzp_Server.lua appends one line per client report to
+Zomboid/Lua/pzp_events.log:
 
-YAML format:
-  'steamid':
-    lifetimeKills: N          # sum of (previous + current) for all accounts
-    'AccountName':
-      previous: N             # kills from all dead characters on this account
-      current:  N             # kills from the currently alive character
-      alive:    true/false
-      survived: N             # in-game hours survived (current character only)
+  v2|<J|U|D>|<account username>|<kills>|<in-game hours>|<character name>
 
-Kill flow:
-  - UpdateKills event  → update current, update survived, check milestones
-  - PlayerDied event   → previous += current, current = 0, alive = false,
-                         update survived, recompute lifetimeKills
-  - On join            → ensure persona/account exists; return snapshot for
-                         discord embed
-  - On disconnect      → return current snapshot; no YAML change (run not over)
+  J  character loaded or created (snapshot)
+  U  periodic update
+  D  character died; kills/hours are the final values
 
-Session kills (computed by discord_module, not here):
-  session_start = snapshot at join
-  session_kills = kills_at_disconnect - session_start
-                + sum of completed runs (deaths) this session
+The read position is stored in the database, so reports written while
+the panel is down are processed when it comes back. Once everything has
+been read and the file is over _ROTATE_BYTES it is truncated.
+
+Callbacks (run outside the read lock):
+  on_death(report)                      -- report dict from apply_report
+  on_milestone(report, threshold, tier) -- tier "life" (character kills)
+                                           or "lifetime" (persona total)
+A milestone is announced once, for the highest threshold crossed between
+two consecutive reports (98 -> 103 announces 100).
 """
 
-__version__ = "4.6.4"
+__version__ = "5.0.0"
 
 import logging
-import os
-import re
 import threading
-import time
 from pathlib import Path
 
 import platform_compat as pc
 
 log = logging.getLogger("pzpanel.kill_tracker")
 
-# ---------------------------------------------------------------------------
-# Milestone thresholds
-# ---------------------------------------------------------------------------
-_LIFE_MILESTONES     = [1, 50, 100, 500, 1000, 5000, 10000]
-_LIFETIME_BASE       = [1, 50, 100, 500, 1000, 5000, 10000]
-_LIFETIME_STEP       = 10000
+LIFE_MILESTONES = [1, 50, 100, 500, 1000, 5000, 10000]
+_LIFETIME_BASE = [1, 50, 100, 500, 1000, 5000, 10000]
+_LIFETIME_STEP = 10000
+
+_ROTATE_BYTES = 512 * 1024
 
 
-def _lifetime_milestones_up_to(n):
-    result = list(_LIFETIME_BASE)
+def lifetime_milestones_up_to(n):
+    result = [t for t in _LIFETIME_BASE if t <= n]
     nxt = _LIFETIME_BASE[-1] + _LIFETIME_STEP
     while nxt <= n:
         result.append(nxt)
@@ -57,418 +48,165 @@ def _lifetime_milestones_up_to(n):
     return result
 
 
-# ---------------------------------------------------------------------------
-# YAML helpers
-# ---------------------------------------------------------------------------
-
-def _yaml_str(s):
-    """Single-quoted YAML string, escaping internal single quotes."""
-    return "'" + str(s).replace("'", "''") + "'"
+def _highest_crossed(thresholds, old, new):
+    crossed = [t for t in thresholds if old < t <= new]
+    return max(crossed) if crossed else None
 
 
-def _write_yaml(data, path):
-    """
-    Write the kills dict to path atomically.
-    data: {steamid: {lifetimeKills, accounts: {name: {previous, current, alive, survived}}}}
-    """
-    lines = []
-    for steamid in sorted(data):
-        entry = data[steamid]
-        lines.append(f"{_yaml_str(steamid)}:")
-        lines.append(f"  lifetimeKills: {entry['lifetimeKills']}")
-        for uname in sorted(entry["accounts"]):
-            acc = entry["accounts"][uname]
-            lines.append(f"  {_yaml_str(uname)}:")
-            lines.append(f"    previous: {acc['previous']}")
-            lines.append(f"    current:  {acc['current']}")
-            lines.append(f"    alive:    {'true' if acc['alive'] else 'false'}")
-            lines.append(f"    survived: {acc['survived']}")
-    content = "\n".join(lines) + "\n"
-    tmp = str(path) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp, str(path))
-
-
-def _read_yaml(path):
-    """
-    Parse the kills YAML.
-    Returns {steamid: {lifetimeKills, accounts: {name: {previous, current, alive, survived}}}}
-    """
-    result = {}
+def parse_event(line):
+    """Parse one event-log line. Returns (kind, username, kills, hours, name) or None."""
+    parts = line.split("|", 5)
+    if len(parts) != 6 or parts[0] != "v2" or parts[1] not in ("J", "U", "D"):
+        return None
+    _, kind, username, kills_s, hours_s, name = parts
+    username = username.strip()
+    if not username:
+        return None
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return result
+        kills = max(0, int(float(kills_s)))
+        hours = max(0.0, float(hours_s))
+    except ValueError:
+        return None
+    return kind, username, kills, hours, name.strip()
 
-    current_steamid = None
-    current_account = None
-
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        if not line:
-            continue
-
-        # Top-level steamid: 'steamid':
-        m = re.match(r"^'(.*)':\s*$", line)
-        if m and not line.startswith("  "):
-            current_steamid = m.group(1)
-            current_account = None
-            if current_steamid not in result:
-                result[current_steamid] = {"lifetimeKills": 0, "accounts": {}}
-            continue
-
-        if current_steamid is None:
-            continue
-
-        # lifetimeKills
-        m = re.match(r"^  lifetimeKills:\s*(\S+)", line)
-        if m:
-            try:
-                result[current_steamid]["lifetimeKills"] = int(float(m.group(1)))
-            except ValueError:
-                pass
-            continue
-
-        # Account name: '  AccountName':
-        m = re.match(r"^  '(.*)':\s*$", line)
-        if m:
-            current_account = m.group(1)
-            if current_account not in result[current_steamid]["accounts"]:
-                result[current_steamid]["accounts"][current_account] = {
-                    "previous": 0, "current": 0, "alive": False, "survived": 0.0
-                }
-            continue
-
-        if current_account is None:
-            continue
-
-        acc = result[current_steamid]["accounts"][current_account]
-
-        m = re.match(r"^    previous:\s*(\S+)", line)
-        if m:
-            try: acc["previous"] = int(float(m.group(1)))
-            except ValueError: pass
-            continue
-
-        m = re.match(r"^    current:\s*(\S+)", line)
-        if m:
-            try: acc["current"] = int(float(m.group(1)))
-            except ValueError: pass
-            continue
-
-        m = re.match(r"^    alive:\s*(\S+)", line)
-        if m:
-            acc["alive"] = m.group(1).strip() == "true"
-            continue
-
-        m = re.match(r"^    survived:\s*(\S+)", line)
-        if m:
-            try: acc["survived"] = float(m.group(1))
-            except ValueError: pass
-
-    return result
-
-
-def _recompute_lifetime(entry):
-    """Recompute lifetimeKills as sum of (previous + current) for all accounts."""
-    total = 0
-    for acc in entry["accounts"].values():
-        total += acc["previous"] + acc["current"]
-    entry["lifetimeKills"] = total
-
-
-# ---------------------------------------------------------------------------
-# KillTracker
-# ---------------------------------------------------------------------------
 
 class KillTracker:
-    """
-    Owns the YAML kills file and all kill arithmetic.
-    Thread-safe. Call start() to begin tailing the event log.
-    """
 
-    def __init__(self, yaml_path, event_log_path,
-                 milestone_callback=None, poll_interval=2.0):
-        """
-        yaml_path         — path to pzp_player_kills.yaml
-        event_log_path    — path to pzp_events.log written by pzp_Server.lua
-        milestone_callback— callable(steamid, username, threshold, tier,
-                                     current_kills, lifetime_kills, survived)
-                            called when a milestone is crossed
-        poll_interval     — seconds between event log polls
-        """
-        self.yaml_path      = Path(yaml_path)
+    def __init__(self, db, event_log_path, on_death=None, on_milestone=None,
+                 poll_interval=2.0):
+        self.db = db
         self.event_log_path = Path(event_log_path)
-        self.milestone_cb   = milestone_callback
-        self.poll_interval  = poll_interval
-
-        self._lock  = threading.Lock()
-        self._data  = _read_yaml(self.yaml_path)   # in-memory kills store
-        self._stop  = threading.Event()
-
-        # Milestone tracking (in-memory; reset on panel restart is safe
-        # because first-poll logic pre-populates them)
-        self._life_fired     = {}   # {username: set(thresholds)}
-        self._lifetime_fired = {}   # {steamid:  set(thresholds)}
-        self._prepopulate_milestones()
-
-        log.info("KillTracker: loaded %d steamid(s) from %s",
-                 len(self._data), self.yaml_path)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self.on_death = on_death
+        self.on_milestone = on_milestone
+        self.poll_interval = poll_interval
+        self._read_lock = threading.Lock()
+        self._stop = threading.Event()
 
     def start(self):
-        """Start the event log tail thread. Returns the thread."""
-        t = threading.Thread(target=self._tail_events,
-                             name="kill-tracker", daemon=True)
+        t = threading.Thread(target=self._run, name="kill-tracker", daemon=True)
         t.start()
         return t
 
     def stop(self):
         self._stop.set()
 
-    def get_snapshot(self, steamid, username):
-        """
-        Return current kill count for this account's alive character.
-        Returns 0 if not found.
-        """
-        with self._lock:
-            return self._get_current(steamid, username)
-
-    def get_lifetime(self, steamid):
-        """Return total lifetime kills for this steamid across all accounts."""
-        with self._lock:
-            entry = self._data.get(steamid)
-            return entry["lifetimeKills"] if entry else 0
-
-    def get_account(self, steamid, username):
-        """
-        Return a copy of the account dict:
-        {previous, current, alive, survived}
-        Returns None if not found.
-        """
-        with self._lock:
-            entry = self._data.get(steamid)
-            if not entry:
-                return None
-            acc = entry["accounts"].get(username)
-            return dict(acc) if acc else None
-
-    def get_all(self):
-        """Return a deep copy of the full data dict for killboard rendering."""
-        with self._lock:
-            import copy
-            return copy.deepcopy(self._data)
-
-    def on_join(self, steamid, username):
-        """
-        Ensure persona/account exists in YAML.
-        Returns (lifetime_kills, current_kills, survived) for the join embed.
-        """
-        with self._lock:
-            self._ensure_account(steamid, username)
-            self._save()
-            entry = self._data[steamid]
-            acc   = entry["accounts"][username]
-            return (entry["lifetimeKills"], acc["current"], acc["survived"])
-
-    def on_disconnect(self, steamid, username):
-        """
-        Return current snapshot for session kill calculation.
-        Does NOT modify the YAML — run is not over.
-        Returns current kill count.
-        """
-        with self._lock:
-            return self._get_current(steamid, username)
-
-    # ------------------------------------------------------------------
-    # Event log tail
-    # ------------------------------------------------------------------
-
-    def _tail_events(self):
-        last_inode = None
-        last_pos   = 0
-        try:
-            last_inode = pc.file_identity(str(self.event_log_path))
-            last_pos   = self.event_log_path.stat().st_size
-        except OSError:
-            pass
-
+    def _run(self):
+        log.info("KillTracker: tailing %s", self.event_log_path)
         while not self._stop.is_set():
+            try:
+                self.drain()
+            except Exception:
+                log.exception("KillTracker: drain failed")
             self._stop.wait(self.poll_interval)
+
+    # ------------------------------------------------------------------
+    # Reading
+    # ------------------------------------------------------------------
+
+    def drain(self):
+        """
+        Process every complete line not yet read. Safe to call from any
+        thread; the connection watcher calls it before join/disconnect so
+        those see the latest kill counts.
+        """
+        notices = []
+        with self._read_lock:
+            path = self.event_log_path
             try:
-                st = self.event_log_path.stat()
+                size = path.stat().st_size
             except FileNotFoundError:
-                continue
+                return
+            identity = str(pc.file_identity(str(path)))
+            pos = int(self.db.get_meta("event_log_pos", "0") or 0)
+            if self.db.get_meta("event_log_id") != identity or size < pos:
+                pos = 0
 
-            current_inode = pc.file_identity(str(self.event_log_path))
-            if last_inode is not None and current_inode != last_inode:
-                last_pos = 0
-            last_inode = current_inode
+            if size > pos:
+                with open(path, "rb") as f:
+                    f.seek(pos)
+                    chunk = f.read(size - pos)
+                # Leave a partial last line for the next pass.
+                end = chunk.rfind(b"\n") + 1
+                for raw in chunk[:end].splitlines():
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if line:
+                        notices.extend(self._process(line))
+                pos += end
 
-            if st.st_size < last_pos:
-                last_pos = 0
-            if st.st_size <= last_pos:
-                continue
+            if pos == size and size > _ROTATE_BYTES:
+                pos = self._rotate(path, size, pos)
 
+            self.db.set_meta("event_log_pos", pos)
+            self.db.set_meta("event_log_id", identity)
+
+        for fn, args in notices:
             try:
-                with open(self.event_log_path, "r",
-                          encoding="utf-8", errors="replace") as f:
-                    f.seek(last_pos)
-                    chunk = f.read()
-                    last_pos = f.tell()
-            except OSError as e:
-                log.warning("KillTracker: error reading event log: %s", e)
-                continue
+                fn(*args)
+            except Exception:
+                log.exception("KillTracker: callback failed")
 
-            for line in chunk.splitlines():
-                line = line.strip()
-                if line:
-                    self._process_event_line(line)
-
-    def _process_event_line(self, line):
-        """Parse and apply one event line: steamid|username|kills|survived|isDeath"""
-        parts = line.split("|")
-        if len(parts) != 5:
-            log.warning("KillTracker: malformed event line: %r", line)
-            return
-        steamid, username, kills_s, survived_s, is_death_s = parts
+    def _rotate(self, path, size, pos):
+        """Truncate a fully-read log. A line the mod appends in the instant
+        between the size check and the truncate is lost."""
         try:
-            kills    = int(float(kills_s))
-            survived = float(survived_s)
-            is_death = is_death_s.strip() == "1"
-        except ValueError:
-            log.warning("KillTracker: unparseable event line: %r", line)
-            return
-
-        with self._lock:
-            self._ensure_account(steamid, username)
-            entry = self._data[steamid]
-            acc   = entry["accounts"][username]
-
-            old_current  = acc["current"]
-            old_lifetime = entry["lifetimeKills"]
-
-            if is_death:
-                # Accumulate into previous, reset current, mark dead
-                acc["previous"] += kills
-                acc["current"]   = 0
-                acc["alive"]     = False
-                acc["survived"]  = survived
-            else:
-                acc["current"]  = kills
-                acc["survived"] = survived
-                acc["alive"]    = True
-
-            _recompute_lifetime(entry)
-            self._save()
-
-            new_current  = acc["current"] if not is_death else kills
-            new_lifetime = entry["lifetimeKills"]
-
-        # Milestone checks (outside lock to avoid deadlock with callback)
-        if self.milestone_cb is not None:
-            self._check_milestones(
-                steamid, username,
-                old_current, new_current,
-                old_lifetime, new_lifetime,
-                survived, is_death
-            )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _ensure_account(self, steamid, username):
-        """Create persona/account in _data if not present. Must hold _lock."""
-        if steamid not in self._data:
-            self._data[steamid] = {"lifetimeKills": 0, "accounts": {}}
-            log.info("KillTracker: new persona %s", steamid)
-        if username not in self._data[steamid]["accounts"]:
-            self._data[steamid]["accounts"][username] = {
-                "previous": 0, "current": 0, "alive": False, "survived": 0.0
-            }
-            log.info("KillTracker: new account %s / %s", steamid, username)
-
-    def _get_current(self, steamid, username):
-        """Return current kill count. Must hold _lock (or be called from locked context)."""
-        entry = self._data.get(steamid)
-        if not entry:
+            if path.stat().st_size != size:
+                return pos
+            with open(path, "r+b") as f:
+                f.truncate(0)
+            log.info("KillTracker: rotated %s at %d bytes", path, size)
             return 0
-        acc = entry["accounts"].get(username)
-        return acc["current"] if acc else 0
-
-    def _save(self):
-        """Write YAML. Must hold _lock."""
-        try:
-            _write_yaml(self._data, self.yaml_path)
         except OSError as e:
-            log.error("KillTracker: failed to write YAML: %s", e)
+            log.warning("KillTracker: could not rotate %s: %s", path, e)
+            return pos
 
-    def _prepopulate_milestones(self):
-        """Pre-populate fired sets from current YAML so we don't spam on restart."""
-        for steamid, entry in self._data.items():
-            lt = entry["lifetimeKills"]
-            lf = self._lifetime_fired.setdefault(steamid, set())
-            for t in _lifetime_milestones_up_to(lt):
-                if lt >= t:
-                    lf.add(t)
-            for uname, acc in entry["accounts"].items():
-                current = acc["current"]
-                mf = self._life_fired.setdefault(uname, set())
-                for t in _LIFE_MILESTONES:
-                    if current >= t:
-                        mf.add(t)
+    # ------------------------------------------------------------------
+    # Processing
+    # ------------------------------------------------------------------
 
-    def _check_milestones(self, steamid, username,
-                          old_current, new_current,
-                          old_lifetime, new_lifetime,
-                          survived, is_death):
-        """Fire milestone callback for any thresholds crossed."""
-        if self.milestone_cb is None:
-            return
+    def _process(self, line):
+        """Apply one line. Returns a list of (callback, args) to run."""
+        parsed = parse_event(line)
+        if parsed is None:
+            log.debug("KillTracker: skipping line %r", line)
+            return []
+        kind, username, kills, hours, name = parsed
+        report = self.db.apply_report(kind, username, kills, hours, name)
+        if report is None:
+            return []
 
-        # Per-life milestones (reset on death — clear fired set)
-        if is_death:
-            self._life_fired.pop(username, None)
-        else:
-            life_fired = self._life_fired.setdefault(username, set())
-            for t in _LIFE_MILESTONES:
-                if t in life_fired:
-                    continue
-                if old_current < t <= new_current:
-                    life_fired.add(t)
-                    self.milestone_cb(
-                        steamid, username, t, "life",
-                        new_current, new_lifetime, survived
-                    )
+        notices = []
+        if report["died"] and self.on_death:
+            notices.append((self.on_death, (report,)))
 
-        # Lifetime milestones
-        lt_fired = self._lifetime_fired.setdefault(steamid, set())
-        for t in _lifetime_milestones_up_to(new_lifetime):
-            if t in lt_fired:
-                continue
-            if old_lifetime < t <= new_lifetime:
-                lt_fired.add(t)
-                self.milestone_cb(
-                    steamid, username, t, "lifetime",
-                    new_current, new_lifetime, survived
-                )
+        old = report["old_kills"]
+        new = report["kills"]
+        steamid = report["steamid"]
 
+        if old is None:
+            # First sighting of a character with history: record the
+            # milestones it is already past so they aren't announced late.
+            reached = _highest_crossed(LIFE_MILESTONES, -1, new)
+            if reached:
+                self.db.claim_life_milestone(report["char_id"], reached)
+            if steamid and report["persona_kills"] is not None:
+                reached = _highest_crossed(
+                    lifetime_milestones_up_to(report["persona_kills"]), -1,
+                    report["persona_kills"])
+                if reached:
+                    self.db.claim_lifetime_milestone(steamid, reached)
+            return notices
 
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
+        if not report["died"]:
+            t = _highest_crossed(LIFE_MILESTONES, old, new)
+            if t and self.db.claim_life_milestone(report["char_id"], t):
+                if self.on_milestone:
+                    notices.append((self.on_milestone, (report, t, "life")))
 
-def build_tracker(yaml_path, event_log_path,
-                  milestone_callback=None, poll_interval=2.0):
-    """Build and return a KillTracker. Call .start() to begin tailing."""
-    return KillTracker(
-        yaml_path=yaml_path,
-        event_log_path=event_log_path,
-        milestone_callback=milestone_callback,
-        poll_interval=poll_interval,
-    )
+        if steamid and report["persona_kills"] is not None and new > old:
+            after = report["persona_kills"]
+            before = after - (new - old)
+            t = _highest_crossed(lifetime_milestones_up_to(after), before, after)
+            if t and self.db.claim_lifetime_milestone(steamid, t):
+                if self.on_milestone:
+                    notices.append((self.on_milestone, (report, t, "lifetime")))
+        return notices

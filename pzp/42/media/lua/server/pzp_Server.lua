@@ -1,157 +1,60 @@
+-- pzp kill tracker v5.0.0 (companion mod for PZ Panel)
+--
+-- Appends one line per client report to Zomboid/Lua/pzp_events.log,
+-- which the panel's kill_tracker.py tails:
+--   v2|<J|U|D>|<account username>|<kills>|<in-game hours survived>|<character name>
+-- The account name comes from the server's own player object, not from
+-- the client. "|" and newlines are stripped from free-text fields.
 require "pzp_Shared"
 
 pzp.Server = pzp.Server or {}
 
-local DATA_FILE = "pzp_player_kills.txt"
+local EVENT_FILE = "pzp_events.log"
 
--- In-memory player database.
-local playerData = {}
+local KINDS = {
+    [pzp.Commands.Snapshot]    = "J",
+    [pzp.Commands.UpdateKills] = "U",
+    [pzp.Commands.PlayerDied]  = "D"
+}
 
--- ------------------------------------------------------------
--- LOAD DATA
--- ------------------------------------------------------------
-
-local function loadData()
-
-    local file = getFileReader(DATA_FILE, false)
-
-    if not file then
-        print("[pzp] No existing kill data file found")
-        return
-    end
-
-    local line = file:readLine()
-
-    while line do
-
-        local username, kills = string.match(
-            line,
-            "^([^|]+)|([^|]+)$"
-        )
-
-        if username and kills then
-
-            playerData[username] = {
-                username = username,
-                kills = tonumber(kills) or 0
-            }
-
-        end
-
-        line = file:readLine()
-    end
-
-    file:close()
-
-    print("[pzp] Loaded kill data for players")
+local function clean(value)
+    local s = string.gsub(tostring(value or ""), "[|\r\n]", " ")
+    return s
 end
-
-
--- ------------------------------------------------------------
--- SAVE DATA
--- ------------------------------------------------------------
-
-local function saveData()
-
-    local file = getFileWriter(DATA_FILE, true, false)
-
-    if not file then
-        print("[pzp] ERROR: Could not open kill data file")
-        return
-    end
-
-    for username, data in pairs(playerData) do
-
-        local line =
-            tostring(data.username) ..
-            "|" ..
-            tostring(data.kills)
-
-        file:write(line)
-        file:write("\n")
-
-    end
-
-    file:close()
-
-    print("[pzp] Kill data saved")
-end
-
-
--- ------------------------------------------------------------
--- UPDATE PLAYER
--- ------------------------------------------------------------
-
-local function updatePlayerKills(player, kills)
-
-    local username = tostring(player:getUsername())
-
-    if not playerData[username] then
-
-        playerData[username] = {
-            username = username,
-            kills = 0
-        }
-
-        print("[pzp] Created new player record: " .. username)
-
-    end
-
-    playerData[username].kills = tonumber(kills) or 0
-
-    print(
-        "[pzp] Updated " ..
-        username ..
-        " -> " ..
-        tostring(playerData[username].kills) ..
-        " kills"
-    )
-
-    saveData()
-end
-
-
--- ------------------------------------------------------------
--- CLIENT COMMAND HANDLER
--- ------------------------------------------------------------
 
 local function onClientCommand(module, command, player, args)
-
     if module ~= pzp.Module then
         return
     end
+    local kind = KINDS[command]
+    if not kind or not player or not args then
+        return
+    end
 
-    if command == pzp.Commands.UpdateKills then
+    local kills = math.max(0, math.floor(tonumber(args.kills) or 0))
+    -- "hoursSurvived" is what pre-5.0.0 clients send.
+    local hours = tonumber(args.hours or args.hoursSurvived) or 0
+    hours = math.floor(hours * 100) / 100
 
-        print("[pzp] ================================")
-        print("[pzp] Kill update received")
-        print("[pzp] Username: " .. tostring(player:getUsername()))
-        print("[pzp] Kills received: " .. tostring(args.kills))
+    local line = "v2|" .. kind .. "|" ..
+                 clean(player:getUsername()) .. "|" ..
+                 tostring(kills) .. "|" ..
+                 tostring(hours) .. "|" ..
+                 clean(args.name)
 
-        updatePlayerKills(player, args.kills)
+    -- createIfNull = true, append = true
+    local file = getFileWriter(EVENT_FILE, true, true)
+    if not file then
+        print("[pzp] ERROR: could not open " .. EVENT_FILE)
+        return
+    end
+    file:write(line .. "\n")
+    file:close()
 
-        print("[pzp] ================================")
-
-    elseif command == pzp.Commands.PlayerDied then
-
-        print("[pzp] ================================")
-        print("[pzp] Death update received")
-        print("[pzp] Username: " .. tostring(player:getUsername()))
-        print("[pzp] Kills received: " .. tostring(args.kills))
-
-        updatePlayerKills(player, args.kills)
-
-        print("[pzp] ================================")
-
+    if kind == "D" then
+        print("[pzp] Death: " .. line)
     end
 end
-
-
--- ------------------------------------------------------------
--- INITIALIZATION
--- ------------------------------------------------------------
-
-loadData()
 
 Events.OnClientCommand.Add(onClientCommand)
 
