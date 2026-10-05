@@ -9,6 +9,16 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.1.0] - 2026-10-04
+
+### Added
+
+- Killboard updates in place. The page polls the new `/api/killboard`
+  every 5 s (paused while the tab is hidden) and replaces the tables
+  only when their content changed, detected by a hash of the rendered
+  HTML. No Workshop update needed (the Lua files only changed in their
+  version comments).
+
 ## [5.0.1] - 2026-10-04
 
 **The `pzp` Workshop mod changed again** (`pzp_Client.lua` only) and

@@ -13,9 +13,10 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "5.0.1"
+__version__ = "5.1.0"
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -937,16 +938,12 @@ def log_page():
     return _page("PZ Panel &mdash; Log", "log", body_inner)
 
 
-@app.get("/killboard", response_class=HTMLResponse)
-def killboard_page():
-    if _player_event_watcher is None:
-        body = '<p class="note">Player-event tracking isn\'t running -- check that pzpanel.ini was readable at startup.</p>'
-        return _page("PZ Panel &mdash; Killboard", "killboard", body)
+def _killboard_tables():
+    """Killboard tables (or the empty-state note) as an HTML fragment."""
     players, characters = _player_event_watcher.db.get_killboard()
     if not players and not characters:
-        body = ('<p class="note">No kill data yet -- it appears once a player with the '
+        return ('<p class="note">No kill data yet -- it appears once a player with the '
                 'PZP mod connects and their first report arrives.</p>')
-        return _page("PZ Panel &mdash; Killboard", "killboard", body)
 
     player_rows = []
     for p in players:
@@ -979,7 +976,7 @@ def killboard_page():
             <td>{status}</td>
         </tr>""")
 
-    body = f"""
+    return f"""
         <p class="eyebrow" style="margin:0 0 .6rem;letter-spacing:.06em;">Players</p>
         <table>
             <tr><th>Player</th><th>Accounts</th><th>Total kills</th><th>Time on server</th></tr>
@@ -990,10 +987,54 @@ def killboard_page():
             <tr><th>Character</th><th>Account</th><th>Player</th><th>Kills</th><th>Survived (in-game)</th><th>Status</th></tr>
             {"".join(char_rows)}
         </table>
-        <p class="note">Kills come from the PZP mod, which reports every 15 seconds while a
-        character is killing and once on death, so live counts can lag slightly.</p>
     """
+
+
+def _killboard_sig(fragment):
+    return hashlib.sha1(fragment.encode("utf-8")).hexdigest()
+
+
+# Polls /api/killboard and swaps in the tables only when their content
+# changed. Skips polls while the tab is hidden.
+_KILLBOARD_JS = """
+<script>
+(function(){
+  var box = document.getElementById('killboard');
+  var sig = box.getAttribute('data-sig');
+  function poll(){
+    if (document.hidden) return;
+    fetch('/api/killboard').then(function(r){ return r.json(); }).then(function(d){
+      if (d.sig && d.sig !== sig) { sig = d.sig; box.innerHTML = d.html; }
+    }).catch(function(err){ console.error('killboard refresh failed', err); });
+  }
+  setInterval(poll, 5000);
+  document.addEventListener('visibilitychange', poll);
+})();
+</script>
+"""
+
+
+@app.get("/killboard", response_class=HTMLResponse)
+def killboard_page():
+    if _player_event_watcher is None:
+        body = '<p class="note">Player-event tracking isn\'t running -- check that pzpanel.ini was readable at startup.</p>'
+        return _page("PZ Panel &mdash; Killboard", "killboard", body)
+    fragment = _killboard_tables()
+    body = f"""
+        <div id="killboard" data-sig="{_killboard_sig(fragment)}">{fragment}</div>
+        <p class="note">Updates automatically. Kills come from the PZP mod, which reports every
+        15 seconds while a character is killing and once on death; time on server updates
+        when a player disconnects.</p>
+    """ + _KILLBOARD_JS
     return _page("PZ Panel &mdash; Killboard", "killboard", body)
+
+
+@app.get("/api/killboard")
+def api_killboard():
+    if _player_event_watcher is None:
+        return {"sig": None, "html": None}
+    fragment = _killboard_tables()
+    return {"sig": _killboard_sig(fragment), "html": fragment}
 
 
 async def _tail_file_events(resolve_path, request=None, poll_interval=0.5, initial_lines=200):

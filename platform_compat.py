@@ -27,7 +27,7 @@ Process mode PID tracking:
              contains "ProjectZomboid" if PID file is stale/missing.
 """
 
-__version__ = "5.0.1"
+__version__ = "5.1.0"
 
 import configparser
 import json
