@@ -15,7 +15,7 @@ This module owns:
   - Steam profile cache
 """
 
-__version__ = "5.0.0"
+__version__ = "5.0.1"
 
 import configparser
 import logging
@@ -495,7 +495,6 @@ class PlayerEventWatcher:
 
         persona = self._persona(steamid, sp, username)
         profile = sp.get("profile_url") or f"https://steamcommunity.com/profiles/{steamid}"
-        blank   = {"name": "​", "value": "​", "inline": False}
 
         fields = [{"name": "Kills:", "value": f"{snap['persona_kills']:,}", "inline": False}]
         if sp.get("pz_hours") is not None:
@@ -510,7 +509,6 @@ class PlayerEventWatcher:
 
         recent = sp.get("recent_games") or []
         if recent:
-            fields.append(blank)
             fields.append({"name": f"{persona} has also played:",
                            "value": "​", "inline": False})
             for g in recent[:2]:

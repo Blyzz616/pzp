@@ -1,8 +1,10 @@
--- pzp kill tracker v5.0.0 (companion mod for PZ Panel)
+-- pzp kill tracker v5.0.1 (companion mod for PZ Panel)
 --
 -- Reports the local character's zombie kills and in-game hours survived
 -- to the server:
---   Snapshot    when the character is loaded or created
+--   Snapshot    once per character, SNAPSHOT_DELAY_MS after it is in the
+--               game (sent from OnPlayerUpdate: a command sent while the
+--               character is still loading never reached the server)
 --   UpdateKills at most every SEND_INTERVAL_MS while the kill count is
 --               changing, and every HEARTBEAT_MS regardless
 --   PlayerDied  once, when the character dies
@@ -10,12 +12,14 @@ require "pzp_Shared"
 
 pzp.Client = pzp.Client or {}
 
-local SEND_INTERVAL_MS = 15000
-local HEARTBEAT_MS     = 300000
+local SNAPSHOT_DELAY_MS = 5000
+local SEND_INTERVAL_MS  = 15000
+local HEARTBEAT_MS      = 300000
 
-local lastKills  = -1
-local lastSendMs = 0
-local deathSent  = false
+local lastKills   = -1    -- -1: no snapshot sent yet for this character
+local lastSendMs  = 0
+local firstSeenMs = nil   -- first update seen for this character
+local deathSent   = false
 
 local function nowMs()
     if getTimestampMs then
@@ -46,18 +50,15 @@ local function send(player, command)
     lastSendMs = nowMs()
 end
 
-local function onCreatePlayer(playerIndex, player)
-    if not player or not player:isLocalPlayer() then
-        return
-    end
-    deathSent = false
-    send(player, pzp.Commands.Snapshot)
+local function resetCharacter()
+    lastKills   = -1
+    firstSeenMs = nil
+    deathSent   = false
 end
 
-local function onGameStart()
-    local player = getSpecificPlayer(0)
-    if player and not player:isDead() then
-        send(player, pzp.Commands.Snapshot)
+local function onCreatePlayer(playerIndex, player)
+    if player and player:isLocalPlayer() then
+        resetCharacter()
     end
 end
 
@@ -65,10 +66,21 @@ local function onPlayerUpdate(player)
     if not player or not player:isLocalPlayer() or player:isDead() then
         return
     end
-    -- A live character after a death means a new character.
-    deathSent = false
+    -- A live character after a death is a new character.
+    if deathSent then
+        resetCharacter()
+    end
 
-    local elapsed = nowMs() - lastSendMs
+    local now = nowMs()
+    if lastKills < 0 then
+        firstSeenMs = firstSeenMs or now
+        if now - firstSeenMs >= SNAPSHOT_DELAY_MS then
+            send(player, pzp.Commands.Snapshot)
+        end
+        return
+    end
+
+    local elapsed = now - lastSendMs
     if elapsed < SEND_INTERVAL_MS then
         return
     end
@@ -86,7 +98,6 @@ local function onPlayerDeath(player)
 end
 
 Events.OnCreatePlayer.Add(onCreatePlayer)
-Events.OnGameStart.Add(onGameStart)
 Events.OnPlayerUpdate.Add(onPlayerUpdate)
 Events.OnPlayerDeath.Add(onPlayerDeath)
 

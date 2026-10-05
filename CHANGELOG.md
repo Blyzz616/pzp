@@ -9,6 +9,24 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.0.1] - 2026-10-04
+
+**The `pzp` Workshop mod changed again** (`pzp_Client.lua` only) and
+needs re-uploading.
+
+### Fixed
+
+- The mod's load snapshot never reached the server. On prozo the first
+  logged report of a session came 77 s after joining, as an update, so
+  the kill made before it counted as pre-existing and the session showed
+  3 kills instead of 4. The snapshot was sent from `OnCreatePlayer` /
+  `OnGameStart`, apparently before the game would deliver it (inferred:
+  the server never logged it). It is now sent from `OnPlayerUpdate`,
+  the path the working periodic updates use, 5 s after the character is
+  in the game; again for each new character after a death.
+- Join embed: removed the blank spacer field above "*persona* has also
+  played:".
+
 ## [5.0.0] - 2026-10-04
 
 Kill tracking rebuilt end to end. **The `pzp` Workshop mod changed and
