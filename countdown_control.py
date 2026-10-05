@@ -18,7 +18,7 @@ Files:
                               each command fires exactly once.
 """
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 import json
 import os

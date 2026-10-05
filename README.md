@@ -1,4 +1,4 @@
-# PZ Panel &nbsp;·&nbsp; v5.1.0
+# PZ Panel &nbsp;·&nbsp; v5.2.0
 
 A web-based control panel for a **Project Zomboid B42 dedicated server**. Manage your server, mods, and players from a browser — on Linux or Windows.
 
@@ -65,8 +65,15 @@ sudo systemctl enable --now pzpanel
    ```
    pip install -r requirements.txt
    ```
-3. Copy `pzpanel.ini.example` → `pzpanel.ini` and fill in `[rcon]` and `[paths]`
-4. Run `pzpanel_windows.bat` to start the panel
+3. Copy `pzpanel.ini.example` → `pzpanel.ini` and fill in `[rcon]` and `[paths]`, and under `[server]` set `windows_mode` (`sc` if the server runs as a Windows service named by `unit`, `process` to launch `windows_start_script`)
+4. Run `pzpanel_windows.bat` to start the panel (it creates `venv\` and installs requirements on first run)
+5. Optional, for automatic mod-update restarts (Linux uses the `pzmodcheck` systemd timer): schedule `pzmodcheck_windows.bat` every 15 minutes, as the same user that runs the panel. From a Command Prompt, with your folder in place of `C:\pzp`:
+   ```
+   schtasks /Create /TN "PZ Panel mod check" /SC MINUTE /MO 15 /TR "\"C:\pzp\pzmodcheck_windows.bat\""
+   ```
+   This runs only while you're logged in. To run it logged out, open the task in Task Scheduler and choose "Run whether user is logged on or not". Leave "If the task is already running" at "Do not start a new instance": a postponed restart keeps the check running for up to ~25 hours.
+
+Panel state (action log, kill database, queued mod changes) lives in `%LOCALAPPDATA%\pzpanel\` on Windows and `/opt/pzp/` on Linux; set `PZPANEL_DATA_DIR` to move it.
 
 ---
 
@@ -84,6 +91,15 @@ password = your_rcon_password
 server_ini = /home/pzserver/Zomboid/Server/servertest.ini
 workshop_acf = /home/pzserver/.steam/steam/steamapps/workshop/appworkshop_108600.acf
 console_log = /home/pzserver/Zomboid/server-console.txt
+```
+
+On Windows the same keys take Windows paths, e.g.:
+
+```ini
+[paths]
+server_ini = C:\Users\YourName\Zomboid\Server\servertest.ini
+workshop_acf = C:\PZServer\steamapps\workshop\appworkshop_108600.acf
+console_log = C:\Users\YourName\Zomboid\server-console.txt
 ```
 
 Everything else is optional — the Settings page has descriptions for each field.
@@ -166,6 +182,7 @@ There is currently no built-in authentication - do not do this.
 ├── pzpanel.ini.example      # Config template
 ├── pzpanel.service          # systemd unit
 ├── pzpanel_windows.bat      # Windows launcher
+├── pzmodcheck_windows.bat   # Windows mod-update check (schedule with Task Scheduler)
 └── pzp/
     ├── 42/                  # Workshop mod (mod.info, media/lua/{client,server,shared})
     └── screens/             # UI screenshots
@@ -175,6 +192,6 @@ There is currently no built-in authentication - do not do this.
 
 ## Version
 
-**v5.1.0** — the Killboard page updates itself when kills or players change (polls every 5 seconds, no full reload). v5.0.1: the mod's first report for a character is sent once it's in the game (it was being lost at load, so the first kill of a session wasn't counted; needs a Workshop update); less empty space in the join embed. v5.0.0: major rewrite of kill tracking: the Workshop mod now reports deaths and character names and appends to an event log the panel actually reads; kills are stored per character in a new database and summed per account and player; session kills and time on server survive panel restarts; join/disconnect/rage-quit/death embeds reworked; milestones post once. **Needs a Workshop update of the `pzp` mod.** v4.6.4: `requests` added to `requirements.txt` (the panel imports it at startup) and install steps now use `pip install -r requirements.txt` (adds the missing `python-multipart`); v4.6.3: description BBCode repairs truncated/odd markup (`[hr][/hr]`, cut-off `[b]`), adds `[quote]`/`[code]`/`[spoiler]`/`[img]`, and only allows http(s) links; v4.6.2: scrollbars match the dark theme and truncated descriptions no longer show raw `[list]`/`[*]` tags; v4.6.1: every panel edit of the server `.ini` is now backed up (`backups/`, newest 20) and written atomically; the Enable modal shows a checkbox picker (with each mod's `mod.info` name) when a Workshop item bundles more than one internal mod ID, so you pick which go into `Mods=`; "Needs Enable" now triggers only when none of a mod's IDs are enabled, so deliberately skipped placeholder IDs stop nagging.
+**v5.2.0** — Windows fixes: the Mods page and the action log no longer use hardcoded Linux paths; new `pzmodcheck_windows.bat` for scheduled mod-update restarts; batch files always get Windows line endings; mod event log read correctly if Java writes it in the Windows codepage. v5.1.0: the Killboard page updates itself when kills or players change (polls every 5 seconds, no full reload). v5.0.1: the mod's first report for a character is sent once it's in the game (it was being lost at load, so the first kill of a session wasn't counted; needs a Workshop update); less empty space in the join embed. v5.0.0: major rewrite of kill tracking: the Workshop mod now reports deaths and character names and appends to an event log the panel actually reads; kills are stored per character in a new database and summed per account and player; session kills and time on server survive panel restarts; join/disconnect/rage-quit/death embeds reworked; milestones post once. **Needs a Workshop update of the `pzp` mod.** v4.6.4: `requests` added to `requirements.txt` (the panel imports it at startup) and install steps now use `pip install -r requirements.txt` (adds the missing `python-multipart`); v4.6.3: description BBCode repairs truncated/odd markup (`[hr][/hr]`, cut-off `[b]`), adds `[quote]`/`[code]`/`[spoiler]`/`[img]`, and only allows http(s) links; v4.6.2: scrollbars match the dark theme and truncated descriptions no longer show raw `[list]`/`[*]` tags; v4.6.1: every panel edit of the server `.ini` is now backed up (`backups/`, newest 20) and written atomically; the Enable modal shows a checkbox picker (with each mod's `mod.info` name) when a Workshop item bundles more than one internal mod ID, so you pick which go into `Mods=`; "Needs Enable" now triggers only when none of a mod's IDs are enabled, so deliberately skipped placeholder IDs stop nagging.
 
 See `CHANGELOG.md` for full history.

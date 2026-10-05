@@ -11,17 +11,18 @@ A mod has a pending update when its live time_updated is newer than
 what's recorded as installed in the ACF.
 """
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 import configparser
 import os
 import re
 
+import platform_compat as pc
 from acf import get_installed_workshop_items
 from ini_safe import safe_write_lines
 from steam_workshop import get_mod_details, SteamWorkshopError
 
-CONFIG_PATH = "/opt/pzp/pzpanel.ini"
+CONFIG_PATH = os.environ.get("PZPANEL_CONFIG") or str(pc.get_default_config_path())
 
 
 class ModCheckError(Exception):

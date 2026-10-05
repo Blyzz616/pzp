@@ -3,7 +3,7 @@ discord_webhook.py — Minimal Discord webhook client shared by
 discord_module.py and mod_restart.py.
 """
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 import logging
 import requests

@@ -8,12 +8,23 @@ Only captures actions initiated through this codebase -- a raw
 since the initiator is what actually knows *why* the action happened.
 """
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
-LOG_PATH = "/opt/pzp/actions.jsonl"
+import platform_compat as pc
+
+_FILE_NAME = "actions.jsonl"
+
+
+def _path():
+    env_override = os.environ.get("PZPANEL_DATA_DIR", "").strip()
+    if env_override:
+        return Path(env_override) / _FILE_NAME
+    return pc.get_default_data_dir() / _FILE_NAME
 
 
 def log_action(actor, action, reason):
@@ -29,7 +40,9 @@ def log_action(actor, action, reason):
         "reason": reason,
     }
     try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
+        path = _path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         print(f"actionlog: failed to write log entry: {e}")
@@ -42,7 +55,7 @@ def read_recent(limit=200):
     than failing the whole read.
     """
     try:
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
+        with open(_path(), "r", encoding="utf-8") as f:
             lines = f.readlines()
     except FileNotFoundError:
         return []

@@ -9,6 +9,42 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.2.0] - 2026-10-04
+
+Windows server support checked and fixed. Verified by running the panel
+on Windows 11 (Python 3.14) against a test Zomboid folder: every page
+and API returned 200; the console stream, action log, kill tracking
+(join, updates, death, new character, disconnect) and a `mod_restart.py`
+dry run all worked. **Not tested:** starting/stopping a real PZ server
+on Windows (`sc` and `process` modes), since no Windows server was
+available.
+
+### Fixed
+
+- `modcheck.py` read its config from the hardcoded
+  `/opt/pzp/pzpanel.ini`, so on Windows the Mods page and the mod-update
+  check got no paths. Now uses `PZPANEL_CONFIG` or the platform default
+  like the rest of the panel. (Clears the known leftover noted since
+  4.x.)
+- `actionlog.py` wrote to the hardcoded `/opt/pzp/actions.jsonl`; on
+  Windows the action log silently failed. Now uses the data directory
+  (`PZPANEL_DATA_DIR`, else `%LOCALAPPDATA%\pzpanel` / `/opt/pzp`) and
+  creates it if needed. Same file on Linux as before.
+- `pzpanel_windows.bat` had LF line endings in the working tree (and
+  would in GitHub zip downloads); cmd.exe misparses some LF-only batch
+  files. New `.gitattributes` forces CRLF for `*.bat`.
+- `kill_tracker.py` falls back to cp1252 when a line of the mod's event
+  log isn't valid UTF-8, in case the server's Java writes the Windows
+  codepage (unconfirmed which it uses).
+
+### Added
+
+- `pzmodcheck_windows.bat`: runs `mod_restart.py` from the venv, the
+  Windows counterpart of `pzmodcheck.service`/`.timer`. README gives a
+  `schtasks` command to run it every 15 minutes.
+- README: Windows `[paths]` example, `windows_mode`, Task Scheduler
+  setup, and where panel state is stored.
+
 ## [5.1.0] - 2026-10-04
 
 ### Added

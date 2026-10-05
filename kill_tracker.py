@@ -22,7 +22,7 @@ A milestone is announced once, for the highest threshold crossed between
 two consecutive reports (98 -> 103 announces 100).
 """
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 import logging
 import threading
@@ -51,6 +51,15 @@ def lifetime_milestones_up_to(n):
 def _highest_crossed(thresholds, old, new):
     crossed = [t for t in thresholds if old < t <= new]
     return max(crossed) if crossed else None
+
+
+def _decode(raw):
+    """UTF-8, falling back to cp1252: on a Windows server the game's Java
+    may write the log in the system codepage."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
 
 
 def parse_event(line):
@@ -128,7 +137,7 @@ class KillTracker:
                 # Leave a partial last line for the next pass.
                 end = chunk.rfind(b"\n") + 1
                 for raw in chunk[:end].splitlines():
-                    line = raw.decode("utf-8", errors="replace").strip()
+                    line = _decode(raw).strip()
                     if line:
                         notices.extend(self._process(line))
                 pos += end
