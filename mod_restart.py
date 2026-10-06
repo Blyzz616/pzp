@@ -13,7 +13,7 @@ controls whether a check cycle starts at all, not an already-running
 countdown.
 """
 
-__version__ = "5.2.0"
+__version__ = "5.2.1"
 
 import configparser
 import os
@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timedelta
 
 from modcheck import check_for_updates, ModCheckError
-from steam_workshop import SteamWorkshopError
+from steam_workshop import SteamWorkshopError, get_change_note, CHANGELOG_URL
 from rcon import RCONClient, RCONError
 from actionlog import log_action
 from automation import is_paused, set_paused
@@ -108,6 +108,40 @@ def post_discord(cfg, content):
         print("mod_restart: discord announcement posted")
 
 
+_CHANGE_NOTE_CHARS = 300
+_SUMMARY_CHARS = 150
+
+
+def _plain(text):
+    """Steam description -> plain text: BBCode tags and blank lines removed."""
+    text = re.sub(r"\[/?[a-zA-Z*][^\]]*\]", "", text or "")
+    return "\n".join(l.strip() for l in text.splitlines() if l.strip())
+
+
+def _clip(text, limit):
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _mod_update_text(mod):
+    """
+    Embed text for one updated mod: the author's change note for this
+    update if there is one, else the first line of the mod's description;
+    then when it was updated and a link to the change notes.
+    """
+    live_ts = mod.get("live_ts")
+    note = get_change_note(mod["mod_id"], live_ts) if live_ts else ""
+    if note:
+        body = _clip(note, _CHANGE_NOTE_CHARS)
+    else:
+        lines = _plain(mod.get("description")).splitlines()
+        body = _clip(lines[0], _SUMMARY_CHARS) if lines else ""
+    footer = f"[Change notes]({CHANGELOG_URL.format(mod_id=mod['mod_id'])})"
+    if live_ts:
+        # Discord renders <t:...:R> as relative time in the reader's timezone.
+        footer = f"Updated <t:{int(live_ts)}:R> · " + footer
+    return f"{body}\n\n{footer}" if body else footer
+
+
 def post_discord_mod_restart(cfg, updated_mods):
     client = _discord_client(cfg)
     if client is None:
@@ -119,7 +153,7 @@ def post_discord_mod_restart(cfg, updated_mods):
         embed = {
             "title": mod["title"],
             "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod['mod_id']}",
-            "description": f"Workshop ID: {mod['mod_id']}",
+            "description": _mod_update_text(mod),
             "color": amber,
         }
         if mod.get("preview_url"):

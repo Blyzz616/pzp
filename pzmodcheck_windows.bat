@@ -1,5 +1,5 @@
 @echo off
-:: pzpanel mod-update check for Windows (v5.2.0)
+:: pzpanel mod-update check for Windows (v5.2.1)
 :: The Windows equivalent of pzmodcheck.service + pzmodcheck.timer on
 :: Linux: checks the Workshop for updated mods and, if any, runs the
 :: in-game countdown and restarts the server.

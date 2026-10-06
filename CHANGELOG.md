@@ -9,6 +9,28 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.2.1] - 2026-10-05
+
+### Fixed
+
+- Session kills undercounted after a rollback. On prozo the panel had
+  your character at 2,273 kills, the session started from that, and the
+  game then loaded the character at 2,264 (the game itself lost 9 kills:
+  confirmed in-game; likely a restart after the last world save,
+  `SaveWorldEveryMinutes=45`). The first 9 kills of the session would not
+  have counted. When a report shows a character's kills going down, an
+  open session's starting point is now lowered to match.
+
+### Changed
+
+- Mod-update restart post: the embed text was "Workshop ID: ####". It
+  now shows the author's change note for that exact update (read from
+  the public Workshop change-notes page, matched by update timestamp;
+  Steam's API doesn't expose change notes), or the first line of the
+  mod's description if there's no note, then "Updated *<relative
+  time>* · Change notes" (Discord shows the time in each reader's
+  timezone). Mod name still links to the Workshop page.
+
 ## [5.2.0] - 2026-10-04
 
 Windows server support checked and fixed. Verified by running the panel

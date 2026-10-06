@@ -26,7 +26,7 @@ Thread safety: a single lock guards every method; the connection is
 shared across threads.
 """
 
-__version__ = "5.2.0"
+__version__ = "5.2.1"
 
 import logging
 import sqlite3
@@ -224,6 +224,17 @@ class PlayerDB:
                      0 if died else 1, 1 if died else 0,
                      now if died else None, char_id))
                 name = name or alive["name"]
+                if kills < old_kills:
+                    # The game rolled the character back (e.g. a server
+                    # restart lost kills made after the last world save).
+                    # Lower an open session's starting point to match, or
+                    # kills re-made this session would not be counted.
+                    log.info("Character %d kills went down %d -> %d",
+                             char_id, old_kills, kills)
+                    self._conn.execute(
+                        "UPDATE sessions SET start_kills=? "
+                        "WHERE start_char_id=? AND start_kills>?",
+                        (kills, char_id, kills))
 
             steamid = self._steamid_for(username)
             return {

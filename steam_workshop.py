@@ -6,9 +6,11 @@ needs no API key for public Workshop items. Returns title + time_updated
 (unix epoch) per mod ID so callers can diff against a last-known state.
 """
 
-__version__ = "5.2.0"
+__version__ = "5.2.1"
 
+import html
 import json
+import re
 import urllib.parse
 import urllib.request
 
@@ -62,6 +64,34 @@ def get_mod_details(mod_ids, timeout=10.0):
             "description": item.get("description", ""),
         }
     return results
+
+
+CHANGELOG_URL = "https://steamcommunity.com/sharedfiles/filedetails/changelog/{mod_id}"
+
+
+def get_change_note(mod_id, time_updated, timeout=10.0):
+    """
+    The author's change note for the update published at time_updated, as
+    plain text, or "" if there is none or the page can't be read. Steam's
+    API doesn't expose change notes, so this reads the public change-notes
+    page, where each entry is <p id="<time_updated>">note</p>. Best effort:
+    never raises.
+    """
+    if not time_updated:
+        return ""
+    req = urllib.request.Request(CHANGELOG_URL.format(mod_id=mod_id),
+                                 headers={"User-Agent": "pzpanel"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            page = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    m = re.search(r'<p id="%d">(.*?)</p>' % int(time_updated), page, re.S)
+    if not m:
+        return ""
+    text = re.sub(r"<br\s*/?>", "\n", m.group(1))
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return "\n".join(line.strip() for line in text.splitlines()).strip()
 
 
 if __name__ == "__main__":
