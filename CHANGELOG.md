@@ -9,6 +9,24 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.3.0] - 2026-10-06
+
+### Added
+
+- Disconnect / rage-quit post: "*character* has survived for:" (in-game
+  time) and "Kills this run:" above "Kills this session:". Uses the
+  account's living character; on a rage-quit, the character that died
+  that session ("*character* survived for:"). Falls back to the account
+  name if the mod hasn't sent a character name; left out if the mod
+  never reported a character.
+
+### Changed
+
+- In-game time now includes months, as the game shows it: "1 month,
+  19 days, 15 hours" (30-day months, zero parts omitted). Applies to the
+  disconnect and death posts and the Killboard. Checked against the
+  game: 1,191 hours matches the character screen exactly.
+
 ## [5.2.1] - 2026-10-05
 
 ### Fixed

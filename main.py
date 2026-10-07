@@ -13,7 +13,7 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "5.2.1"
+__version__ = "5.3.0"
 
 import asyncio
 import hashlib

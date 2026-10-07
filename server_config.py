@@ -5,7 +5,7 @@ Extracted from main.py (v4.2.2) to keep the FastAPI app file focused on routes.
 All functions here are pure utility — no FastAPI imports, no app object.
 """
 
-__version__ = "5.2.1"
+__version__ = "5.3.0"
 
 import configparser
 import os

@@ -1,4 +1,4 @@
--- pzp kill tracker v5.2.1 (companion mod for PZ Panel)
+-- pzp kill tracker v5.3.0 (companion mod for PZ Panel)
 --
 -- Appends one line per client report to Zomboid/Lua/pzp_events.log,
 -- which the panel's kill_tracker.py tails:

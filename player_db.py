@@ -26,7 +26,7 @@ Thread safety: a single lock guards every method; the connection is
 shared across threads.
 """
 
-__version__ = "5.2.1"
+__version__ = "5.3.0"
 
 import logging
 import sqlite3
@@ -321,6 +321,9 @@ class PlayerDB:
         End a session at disconnect. Returns None if no session was open, else:
           username, duration, total_seconds, session_kills,
           rage_quit -- a character died this session and no new one was made
+          character -- {name, kills, hours, alive} of the account's living
+                       character, else the one that died this session;
+                       None if the mod never reported one
         """
         now = now or time.time()
         with self._lock, self._tx():
@@ -341,9 +344,10 @@ class PlayerDB:
                     session_kills += max(0, c["kills"] - c["pre_kills"])
 
             alive = self._alive_character(username)
-            died_this_session = self._conn.execute(
-                "SELECT 1 FROM characters WHERE username=? AND alive=0 AND died_at>=?",
-                (username, joined_at)).fetchone() is not None
+            died = self._conn.execute(
+                "SELECT * FROM characters WHERE username=? AND alive=0 AND died_at>=? "
+                "ORDER BY died_at DESC LIMIT 1", (username, joined_at)).fetchone()
+            shown = alive or died
 
             duration = max(0.0, now - joined_at)
             self._ensure_persona(steamid, now)
@@ -359,7 +363,13 @@ class PlayerDB:
                 "duration": duration,
                 "total_seconds": total,
                 "session_kills": session_kills,
-                "rage_quit": alive is None and died_this_session,
+                "rage_quit": alive is None and died is not None,
+                "character": None if shown is None else {
+                    "name": shown["name"],
+                    "kills": shown["kills"],
+                    "hours": shown["hours"],
+                    "alive": bool(shown["alive"]),
+                },
             }
 
     def close_all_sessions(self, now=None, count_time=True):

@@ -15,7 +15,7 @@ This module owns:
   - Steam profile cache
 """
 
-__version__ = "5.2.1"
+__version__ = "5.3.0"
 
 import configparser
 import logging
@@ -154,14 +154,14 @@ def _md(text):
 def _fmt_ingame_time(hours_survived):
     if hours_survived is None:
         return None
+    """In-game time in the game's own style: "1 month, 19 days, 15 hours"
+    (30-day months; zero parts left out)."""
     total_hours = int(hours_survived)
-    days = total_hours // 24
-    hrs  = total_hours % 24
-    if days and hrs:
-        return f"{days} day{'s' if days != 1 else ''}, {hrs} hour{'s' if hrs != 1 else ''}"
-    if days:
-        return f"{days} day{'s' if days != 1 else ''}"
-    return f"{hrs} hour{'s' if hrs != 1 else ''}"
+    days, hrs = divmod(total_hours, 24)
+    months, days = divmod(days, 30)
+    parts = [f"{n} {unit}{'s' if n != 1 else ''}"
+             for n, unit in ((months, "month"), (days, "day"), (hrs, "hour")) if n]
+    return ", ".join(parts) or "0 hours"
 
 
 # ---------------------------------------------------------------------------
@@ -557,8 +557,17 @@ class PlayerEventWatcher:
                    fmt_total_time(total)]
         if total >= 86400:
             lines.append(f"({int(total // 3600):,} hours)")
-        fields = [{"name": "Kills this session:",
-                   "value": f"{res['session_kills']:,}", "inline": False}]
+        fields = []
+        char = res.get("character")
+        if char:
+            char_name = char["name"] or res["username"]
+            verb = "has survived for:" if char["alive"] else "survived for:"
+            fields.append({"name": f"{char_name} {verb}",
+                           "value": _fmt_ingame_time(char["hours"]), "inline": False})
+            fields.append({"name": "Kills this run:",
+                           "value": f"{char['kills']:,}", "inline": False})
+        fields.append({"name": "Kills this session:",
+                       "value": f"{res['session_kills']:,}", "inline": False})
 
         if res["rage_quit"]:
             msg = random.choice(RAGE_MESSAGES).format(name=_md(persona))

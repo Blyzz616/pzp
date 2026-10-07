@@ -21,7 +21,7 @@ restart). Both call apply_pending() first.
 Same JSON-file-with-atomic-rename pattern as removed_mods.py.
 """
 
-__version__ = "5.2.1"
+__version__ = "5.3.0"
 
 import json
 import os
