@@ -13,17 +13,20 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "5.3.0"
+__version__ = "5.6.3"
 
 import asyncio
+import configparser
 import hashlib
 import html
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +37,8 @@ from fastapi.staticfiles import StaticFiles
 
 from rcon import RCONClient
 from modcheck import (check_for_updates, add_workshop_item, remove_workshop_item,
-                       reorder_workshop_items, add_mods_line_items, ModCheckError)
+                       reorder_workshop_items, add_mods_line_items, ModCheckError,
+                       pzp_mod_present, PZP_WORKSHOP_ID)
 from steam_workshop import get_mod_details, SteamWorkshopError
 from actionlog import log_action, read_recent
 from automation import is_paused, set_paused
@@ -164,8 +168,8 @@ def status_page():
                 <div class="hazard-frame-inner">
                     <p class="eyebrow" style="color:var(--rust);letter-spacing:.1em;">Danger Zone</p>
                     <p class="note" style="border-top:none;margin-top:0;padding-top:.5rem;">
-                        Stops the server and permanently deletes <code>{html.escape(str(save_dir))}</code> --
-                        every character, every building, all of it. No undo. Server is left stopped afterward.
+                        Stops the server and permanently deletes <code>{html.escape(str(save_dir))}</code>.
+                        Every character, every building, all of it. No undo. Server is left stopped afterward.
                     </p>
                     <div class="actions">
                         <button type="button" class="btn danger" style="margin-left:auto;" onclick="openWipeModal()">Wipe World &amp; Reset</button>
@@ -209,7 +213,6 @@ def status_page():
             <form method="post" action="/action/restart"><button type="submit" class="btn {restart_class}" id="btn-restart">Restart</button></form>
             <form method="post" action="/action/stop"><button type="submit" class="btn {stop_class}" id="btn-stop">Stop</button></form>
         </div>
-        <p class="note">Restart/stop save gracefully (RCON quit before the process stops).</p>
         <div class="readout" style="margin-top:1.5rem;padding-top:1.25rem;border-top:1px solid var(--line);">
             {automation_tag}
             <form method="post" id="watchdog-form" action="/automation/{automation_action}" style="margin-left:auto;">
@@ -938,6 +941,533 @@ def log_page():
     return _page("PZ Panel &mdash; Log", "log", body_inner)
 
 
+def _players_map_url(x, y):
+    """Map link for a position, from [players] map_url in pzpanel.ini with
+    {x}/{y} placeholders (http/https only). Empty when not configured."""
+    try:
+        cfg = configparser.ConfigParser()
+        cfg.read(CONFIG_PATH)
+        template = cfg.get("players", "map_url", fallback="").strip()
+    except configparser.Error:
+        return ""
+    if not template.lower().startswith(("http://", "https://")):
+        return ""
+    return template.replace("{x}", str(x)).replace("{y}", str(y))
+
+
+def _pretty_id(value):
+    """"base:policeofficer" -> "Policeofficer", "LongBlade" -> "Long Blade"."""
+    value = (value or "").split(":")[-1].split(".")[-1].replace("_", " ")
+    value = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value).strip()
+    return value[:1].upper() + value[1:]
+
+
+_POS_TRAITS = """Adrenaline Junkie|Athletic|Axeman|Baseball Player|Brave|Brawler|Burglar|Cat's Eyes|Cook|
+Desensitized|Dextrous|Eagle Eyed|Fast Healer|Fast Learner|Fast Reader|Fishing|Fit|Flexible|Gardener|Graceful|
+Gymnast|Handy|Herbalist|Hiker|Hunter|Inconspicuous|Iron Gut|Jogger|Keen Hearing|Light Eater|Low Thirst|Lucky|
+Mechanics|Nutritionist|Organized|Outdoorsman|Resilient|Speed Demon|Stout|Strong|Thick Skinned|Tailor|Wakeful|
+Whittler|Blacksmith|Carpenter|Nimble|Lightfooted|Sneaky|Emergency Service|Night Owl"""
+_NEG_TRAITS = """Agoraphobic|All Thumbs|Asthmatic|Claustophobic|Clumsy|Conspicuous|Cowardly|Deaf|Disorganized|
+Emaciated|Feeble|Hard of Hearing|Hearty Appetite|Hemophobic|High Thirst|Illiterate|Insomniac|Obese|
+Out of Shape|Overweight|Pacifist|Prone to Illness|Short Sighted|Slow Healer|Slow Learner|Slow Reader|Smoker|
+Sunday Driver|Thin Skinned|Underweight|Unfit|Unlucky|Very Underweight|Weak|Weak Stomach|Poor Eyes"""
+
+
+def _trait_key(name):
+    return re.sub(r"[^a-z]", "", (name or "").split(":")[-1].split(".")[-1].lower())
+
+
+_TRAITS = {}
+for _n in _POS_TRAITS.replace("\n", "").split("|"):
+    if _n.strip():
+        _TRAITS[_trait_key(_n)] = (_n.strip(), "pos")
+for _n in _NEG_TRAITS.replace("\n", "").split("|"):
+    if _n.strip():
+        _TRAITS[_trait_key(_n)] = (_n.strip(), "neg")
+_TRAITS["shortsighted"] = ("Short Sighted", "neg")
+_TRAITS["dexterous"] = ("Dextrous", "pos")
+
+
+def _trait_chip(trait_id):
+    """A trait chip, tinted green (helps) or red (hurts) when the trait is
+    known; unknown traits stay neutral and show their prettified ID."""
+    name, sign = _TRAITS.get(_trait_key(trait_id), (_pretty_id(trait_id), ""))
+    title = {"pos": "Positive trait", "neg": "Negative trait"}.get(sign, "")
+    t = f' title="{title}"' if title else ""
+    return f'<span class="chip {sign}"{t}>{html.escape(name)}</span>'
+
+
+# In-game skill screen: group -> [(perk ID the mod sends, name shown in game)].
+_SKILL_LAYOUT = [
+    ("Combat - Firearms", [("Aiming", "Aiming"), ("Reloading", "Reloading")]),
+    ("Combat - Melee", [("Axe", "Axe"), ("LongBlade", "Long Blade"), ("Blunt", "Long Blunt"),
+                        ("Maintenance", "Maintenance"), ("SmallBlade", "Short Blade"),
+                        ("SmallBlunt", "Short Blunt"), ("Spear", "Spear")]),
+    ("Crafting", [("Blacksmith", "Blacksmithing"), ("Woodwork", "Carpentry"), ("Carving", "Carving"),
+                  ("Cooking", "Cooking"), ("Electricity", "Electrical"), ("Glassmaking", "Glassmaking"),
+                  ("Knapping", "Knapping"), ("Masonry", "Masonry"), ("Mechanics", "Mechanics"),
+                  ("Pottery", "Pottery"), ("Tailoring", "Tailoring"), ("MetalWelding", "Welding")]),
+    ("Farming", [("Farming", "Agriculture"), ("Husbandry", "Animal Care"), ("Butchering", "Butchering")]),
+    ("Physical", [("Fitness", "Fitness"), ("Lightfoot", "Lightfooted"), ("Nimble", "Nimble"),
+                  ("Sprinting", "Running"), ("Sneak", "Sneaking"), ("Strength", "Strength")]),
+    ("Survival", [("Doctor", "First Aid"), ("Fishing", "Fishing"), ("PlantScavenging", "Foraging"),
+                  ("Tracking", "Tracking"), ("Trapping", "Trapping")]),
+]
+
+
+def _skills_html(skills, ukey):
+    """All skills laid out like the game's skill screen: ten squares per skill,
+    gold for each level reached, a grey bar in the next square for progress.
+    Collapsible; data-sk/data-lv let the page flash a skill on level-up."""
+    have = {n: (lvl, pct) for n, lvl, pct in skills}
+    known = {pid for _, items in _SKILL_LAYOUT for pid, _ in items}
+    layout = list(_SKILL_LAYOUT)
+    extra = [(n, _pretty_id(n)) for n in sorted(have) if n not in known]
+    if extra:
+        layout.append(("Other", extra))
+
+    def row(pid, label):
+        lvl, pct = have.get(pid, (0, 0))
+        sq = []
+        for i in range(1, 11):
+            if i <= lvl:
+                sq.append('<i class="sq on"></i>')
+            elif i == lvl + 1 and pct:
+                sq.append(f'<i class="sq"><b style="width:{pct}%"></b></i>')
+            else:
+                sq.append('<i class="sq"></i>')
+        return (f'<div class="sk{" trained" if lvl else ""}" data-sk="{html.escape(ukey + "|" + pid, quote=True)}" '
+                f'data-lv="{lvl}" title="{html.escape(label)}: level {lvl}'
+                f'{f", {pct}% to next" if pct else ""}"><span class="skn">{html.escape(label)}</span>'
+                f'<span class="sqs">{"".join(sq)}</span></div>')
+
+    groups = "".join(
+        f'<div class="sg"><div class="sgh fold inv" data-toggle="{html.escape("g:" + ukey + "|" + title, quote=True)}" '
+        f'role="button" tabindex="0" title="Show / hide this group"><i class="sgi"></i>{html.escape(title)}</div>'
+        + "".join(row(pid, label) for pid, label in items) + '</div>'
+        for title, items in layout)
+    trained = sum(1 for lvl, _ in have.values() if lvl > 0)
+    key = html.escape("s:" + ukey, quote=True)
+    return (f'<div class="lf wide"><div class="sk-head fold" data-toggle="{key}" role="button" tabindex="0" '
+            f'title="Show / hide all skills"><span class="lk">Skills</span>'
+            f'<span class="ls">{trained} trained</span><i class="chev"></i></div>'
+            f'<div class="skills-body" data-key="{key}"><div class="sk-groups">{groups}</div></div></div>')
+
+
+def _live_details_html(live, ukey=""):
+    """Live status panel for a player: what the mod's latest report says.
+    Every value sits in its own grid cell, so a value that grows (a longer
+    "updated 1m 5s ago", a longer skill list) can't push other values onto a
+    new line."""
+    if not live:
+        sq = "".join(f'<i class="sq ld s{i}"><b></b></i>' for i in range(10))
+        return ('<div class="live live-empty" title="Live status arrives within seconds of the player '
+                'loading in. It needs the PZP mod v5.4.0 or newer."><span class="lk">Waiting for '
+                f'live status</span><span class="sqs">{sq}</span></div>')
+
+    def cell(label, value_html, sub_html="", wide=False):
+        sub = f'<span class="ls">{sub_html}</span>' if sub_html else ""
+        return (f'<div class="lf{" wide" if wide else ""}"><span class="lk">{label}</span>'
+                f'<div class="lv">{value_html}</div>{sub}</div>')
+
+    cells = []
+    x, y, z = live["x"], live["y"], live["z"]
+    sub = f'cell {x // 300}, {y // 300}'
+    if z:
+        sub = f'floor {z} · ' + sub
+    map_url = _players_map_url(x, y)
+    if map_url:
+        sub += (f' · <a href="{html.escape(map_url, quote=True)}" target="_blank" '
+                f'rel="noopener noreferrer" class="link-id">map</a>')
+    cells.append(cell("Location", f'<span class="mono">{x:,}, {y:,}</span>', sub))
+
+    if live["health"] is not None:
+        h = max(0, min(100, live["health"]))
+        cls = "ok" if h >= 70 else ("warn" if h >= 35 else "bad")
+        cells.append(cell("Health",
+                          f'<span class="hbar {cls}"><i style="width:{h}%"></i></span>'
+                          f'<span class="mono hnum">{h}%</span>'))
+    state = []
+    if live["infected"]:
+        state.append('<span class="tag bad">Infected</span>')
+    if live["asleep"]:
+        state.append('<span class="tag info">Asleep</span>')
+    if state:
+        cells.append(cell("Status", " ".join(state)))
+    if live["profession"]:
+        cells.append(cell("Profession", html.escape(_pretty_id(live["profession"]))))
+    if live["weapon"]:
+        cells.append(cell("Holding", html.escape(live["weapon"])))
+    if live["vehicle"]:
+        cells.append(cell("In vehicle", html.escape(_pretty_id(live["vehicle"]))))
+    if live["xp"]:
+        cells.append(cell("Total XP", f'<span class="mono">{live["xp"]:,}</span>'))
+
+    wide = []
+    if live["traits"]:
+        chips = "".join(_trait_chip(t) for t in live["traits"])
+        wide.append(cell("Traits", f'<div class="chips">{chips}</div>', wide=True))
+    if live["skills"] or ukey:
+        wide.append(_skills_html(live["skills"], ukey))
+
+    return (f'<div class="live"><div class="live-top"><span>Live status</span>'
+            f'<span class="updated">updated <span class="tick" data-since="{live["at"]:.0f}" '
+            f'data-base="0" data-fmt="ago"></span></span></div>'
+            f'<div class="live-grid">{"".join(cells)}</div>{"".join(wide)}</div>')
+
+
+_PLAYERS_CSS = """
+<style>
+#players .mono,#players .tick{font-variant-numeric:tabular-nums}
+#players .tick{white-space:nowrap}
+.pcard{border:1px solid var(--line);border-top:3px solid var(--amber-dim);border-radius:3px;margin-bottom:1.25rem;background:rgba(0,0,0,.16)}
+.phead{padding:1.1rem 1.2rem 1rem;text-align:center}
+.phead.fold{cursor:pointer;user-select:none}
+.phead.fold:hover{background:rgba(255,176,32,.04)}
+.phead:focus-visible,.ahead:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+.pname{display:flex;align-items:center;justify-content:center;gap:.8rem}
+.pname img{width:46px;height:46px;border-radius:50%;border:2px solid var(--amber-dim);object-fit:cover}
+.pn{font-family:'Oswald',sans-serif;font-weight:600;font-size:1.65rem;letter-spacing:.03em;color:var(--amber);line-height:1.1}
+.chev{display:inline-block;width:.55rem;height:.55rem;border-right:2px solid var(--ink-dim);border-bottom:2px solid var(--ink-dim);transform:rotate(45deg);margin:-.25rem 0 0 .15rem;transition:transform .15s}
+.phead.open .chev,.ahead.open .chev,.sk-head.open .chev{transform:rotate(225deg);margin-top:.2rem}
+.pstats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.6rem 1rem;margin-top:.9rem;padding-top:.8rem;border-top:1px solid var(--line)}
+.ps{display:flex;flex-direction:column;gap:.15rem;min-width:0}
+.pk{font-size:.72rem;color:var(--ink-dim)}
+.pv{font-family:'JetBrains Mono',monospace;font-size:.95rem;color:var(--ink);white-space:nowrap}
+a.pn{text-decoration:none}a.pn:hover{text-decoration:underline}
+.others,.chars-more{display:none}
+.others.open,.chars-more.open{display:block}
+.acct{border-top:1px solid var(--line)}
+.ahead{display:flex;align-items:center;gap:.7rem;padding:.65rem 1.2rem;background:rgba(255,255,255,.025)}
+.ahead.fold{cursor:pointer;user-select:none}
+.ahead.fold:hover{background:rgba(255,176,32,.05)}
+.ahead .aname{font-family:'JetBrains Mono',monospace;font-size:.9rem;color:var(--ink)}
+.ahead .ameta{font-size:.78rem;color:var(--ink-dim);margin-left:auto;white-space:nowrap}
+.ahead .chev{margin-left:.2rem}
+.crow{display:grid;grid-template-columns:minmax(0,1fr) 6.5rem 6.5rem;gap:.4rem 1rem;align-items:center;padding:.8rem 1.2rem}
+.crow.fold{cursor:pointer;user-select:none}
+.crow.fold:hover{background:rgba(255,176,32,.04)}
+.crow.fold:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+.crow.fold .chev{margin-left:.5rem;vertical-align:middle}
+.crow.open~.cdetail{display:none}
+.inv .chev{transform:rotate(225deg);margin-top:.2rem}
+.inv.open .chev{transform:rotate(45deg);margin-top:-.25rem}
+.crow.old{opacity:.7;padding-top:.55rem;padding-bottom:.55rem}
+.crow + .crow{border-top:1px dashed var(--line)}
+.cname{font-weight:600;font-size:1.02rem;min-width:0}
+.cname .tag{margin-left:.5rem;vertical-align:middle}
+.csub{display:block;font-weight:400;font-size:.78rem;color:var(--ink-dim);margin-top:.15rem}
+.cnum{display:flex;flex-direction:column;gap:.1rem;font-family:'JetBrains Mono',monospace;font-size:1.05rem;white-space:nowrap}
+.cnum small{font-family:'Inter',sans-serif;font-size:.72rem;color:var(--ink-dim)}
+.cdetail{padding:0 1.2rem 1rem}
+.live{background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:2px;padding:.7rem .9rem .8rem}
+.live-empty{color:var(--ink-dim);font-size:.82rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;min-height:2.4rem}
+.empty{margin:0;padding:1.6rem 0;text-align:center;color:var(--ink-dim)}
+.tip{position:relative;display:inline-block;cursor:help;outline:none}
+.empty .tip{border-bottom:1px dotted var(--ink-dim)}
+.tip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + .5rem);width:min(32rem,78vw);padding:.7rem .9rem;background:var(--void);border:1px solid var(--line);border-radius:2px;box-shadow:0 6px 20px rgba(0,0,0,.55);color:var(--ink);font:400 .8rem/1.5 'Inter',sans-serif;letter-spacing:0;text-transform:none;text-align:left;white-space:normal;opacity:0;visibility:hidden;transition:opacity .12s;z-index:30;pointer-events:none}
+.empty .tip::after{left:50%;transform:translateX(-50%)}
+.tip:hover::after,.tip:focus::after{opacity:1;visibility:visible}
+.sqs{display:inline-flex;gap:2px;flex:none}
+.sq{position:relative;display:block;width:12px;height:12px;box-sizing:border-box;background:#0a0a0a;border:1px solid #6a6a6a;overflow:hidden}
+.sq b{position:absolute;left:0;top:0;bottom:0;background:#5e5e5e}
+.sq.on{background:#f0c419;border-color:#9a7b00;box-shadow:inset 0 0 0 1px rgba(255,235,140,.35)}
+.sq.ld b{width:0}
+.sq.ld.s0 b{animation:sqld0 6s linear infinite}
+.sq.ld.s1 b{animation:sqld1 6s linear infinite}
+.sq.ld.s2 b{animation:sqld2 6s linear infinite}
+.sq.ld.s3 b{animation:sqld3 6s linear infinite}
+.sq.ld.s4 b{animation:sqld4 6s linear infinite}
+.sq.ld.s5 b{animation:sqld5 6s linear infinite}
+.sq.ld.s6 b{animation:sqld6 6s linear infinite}
+.sq.ld.s7 b{animation:sqld7 6s linear infinite}
+.sq.ld.s8 b{animation:sqld8 6s linear infinite}
+.sq.ld.s9 b{animation:sqld9 6s linear infinite}
+@keyframes sqld0{0%{width:0;background:#5e5e5e}7%{width:100%;background:#5e5e5e}7.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld1{0%{width:0;background:#5e5e5e}8%{width:0;background:#5e5e5e}15%{width:100%;background:#5e5e5e}15.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld2{0%{width:0;background:#5e5e5e}16%{width:0;background:#5e5e5e}23%{width:100%;background:#5e5e5e}23.009999999999998%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld3{0%{width:0;background:#5e5e5e}24%{width:0;background:#5e5e5e}31%{width:100%;background:#5e5e5e}31.009999999999998%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld4{0%{width:0;background:#5e5e5e}32%{width:0;background:#5e5e5e}39%{width:100%;background:#5e5e5e}39.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld5{0%{width:0;background:#5e5e5e}40%{width:0;background:#5e5e5e}47%{width:100%;background:#5e5e5e}47.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld6{0%{width:0;background:#5e5e5e}48%{width:0;background:#5e5e5e}55%{width:100%;background:#5e5e5e}55.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld7{0%{width:0;background:#5e5e5e}56%{width:0;background:#5e5e5e}63%{width:100%;background:#5e5e5e}63.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld8{0%{width:0;background:#5e5e5e}64%{width:0;background:#5e5e5e}71%{width:100%;background:#5e5e5e}71.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+@keyframes sqld9{0%{width:0;background:#5e5e5e}72%{width:0;background:#5e5e5e}79%{width:100%;background:#5e5e5e}79.01%{width:100%;background:#f0c419}93%{width:100%;background:#f0c419}93.01%{width:0;background:#5e5e5e}100%{width:0;background:#5e5e5e}}
+.sk-head{display:flex;align-items:center;gap:.6rem;padding:.2rem 0;cursor:pointer;user-select:none}
+.sk-head:hover .lk{color:var(--amber)}
+.sk-head .chev{margin-left:auto}
+.sk-head.open .chev{transform:rotate(225deg);margin-top:.2rem}
+.sk-head:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.skills-body{display:none;margin-top:.5rem}
+.skills-body.open{display:block}
+.sk-groups{columns:16rem 2;column-gap:2.2rem;padding:.4rem .2rem .2rem}
+.sg{break-inside:avoid;margin-bottom:1.1rem}
+.sk-head .lk{font-size:.85rem;color:var(--ink)}
+.sgh{display:flex;align-items:center;gap:.6rem;padding-bottom:.35rem;margin-bottom:.25rem;border-bottom:1px solid var(--line);font-size:.92rem;font-weight:600;color:#e9e9e9}
+.sgh{cursor:pointer;user-select:none}
+.sgh:hover{color:var(--amber)}
+.sgh:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.sgh.open~.sk{display:none}
+.sgi{transition:transform .15s}
+.sgh.open .sgi{transform:rotate(-90deg)}
+.sgi{width:1.3rem;height:1.3rem;box-sizing:border-box;border:1px solid #8a8a8a;border-radius:3px;background:#101010;position:relative;flex:none}
+.sgi::after{content:"";position:absolute;left:3px;right:3px;top:4px;height:8px;background:#9a9a9a;clip-path:polygon(0 0,100% 0,100% 45%,50% 100%,0 45%)}
+.sk{display:flex;align-items:center;justify-content:space-between;gap:.8rem;padding:.2rem 0 .2rem .9rem}
+.skn{font-size:.86rem;color:#8d8d8d;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sk.trained .skn{color:#c4c4c4}
+.sk.lvlup .sq.on{animation:sklv 4.5s ease-out both;animation-delay:calc(var(--el,0s) * -1)}
+@keyframes sklv{0%,12%{background:#38c24a;border-color:#1f8a2e}100%{background:#f0c419;border-color:#9a7b00}}
+@media(prefers-reduced-motion:reduce){.sq.ld b,.sk.lvlup .sq.on{animation:none}}
+.live-top{display:flex;justify-content:space-between;align-items:center;font-size:.76rem;color:var(--ink-dim);margin-bottom:.6rem;padding-bottom:.45rem;border-bottom:1px solid var(--line)}
+.live-top>span:first-child{color:var(--signal)}
+.live-top>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--signal);margin-right:.45rem;box-shadow:0 0 6px var(--signal)}
+.updated{font-family:'JetBrains Mono',monospace;min-width:9.5rem;text-align:right;white-space:nowrap}
+.live-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.7rem 1.2rem}
+.lf{display:flex;flex-direction:column;gap:.2rem;min-width:0}
+.lf.wide{margin-top:.75rem}
+.lk{font-size:.72rem;color:var(--ink-dim)}
+.lv{font-size:.92rem;overflow-wrap:anywhere;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+.ls{font-size:.74rem;color:var(--ink-dim)}
+.hbar{flex:0 0 7rem;height:.55rem;background:var(--void);border:1px solid var(--line);border-radius:1px;overflow:hidden}
+.hbar i{display:block;height:100%}
+.hbar.ok i{background:var(--signal)}.hbar.warn i{background:var(--amber)}.hbar.bad i{background:var(--rust)}
+.hnum{min-width:2.8rem}
+.chips{display:flex;flex-wrap:wrap;gap:.35rem}
+.chip{font-size:.78rem;padding:.18rem .55rem;border:1px solid var(--line);border-radius:2px;background:rgba(255,255,255,.03)}
+.chip.pos{color:#7ddc8a;border-color:rgba(80,200,110,.45);background:rgba(60,190,95,.08)}
+.chip.neg{color:#ff8a78;border-color:rgba(230,90,70,.5);background:rgba(220,80,60,.09)}
+@media(max-width:700px){.pstats{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.crow{grid-template-columns:minmax(0,1fr) auto auto}.pn{font-size:1.35rem}.ahead{flex-wrap:wrap}.ahead .ameta{margin-left:0;width:100%}}
+</style>
+"""
+
+
+_PLAYERS_HELP = ("Updates automatically when players join or leave. Kills and in-game survival time "
+                 "come from the PZP mod, which reports every 15 seconds while a character is killing and every "
+                 "5 minutes otherwise, so they can lag slightly. Click a player's name bar to show their other "
+                 "accounts; click an account to show its other characters. \"This session\" = kills since they "
+                 "connected; lifetime = every character on every account linked to the Steam profile.")
+
+
+def _player_char_row(c, session_kills=None, collapse_key=None):
+    dash = "—"
+    if c is None:
+        return ('<div class="crow"><div class="cname" style="color:var(--ink-dim);font-weight:400;">'
+                'No character reported yet</div></div>')
+    tag = ('<span class="tag ok">Alive</span>' if c["alive"]
+           else '<span class="tag muted">Dead</span>')
+    sub = html.escape(_fmt_ingame_time(c["hours"]) or dash)
+    if not c["alive"] and c.get("died_at"):
+        sub += " · died " + datetime.fromtimestamp(c["died_at"]).strftime("%d %b %Y")
+    if collapse_key:
+        ck = html.escape(collapse_key, quote=True)
+        head_attrs = (f' fold inv" data-toggle="{ck}" role="button" tabindex="0" '
+                      f'title="Show / hide this character\'s details"')
+        chev = '<i class="chev"></i>'
+    else:
+        head_attrs, chev = '"', ""
+    out = (f'<div class="crow{"" if c["alive"] else " old"}{head_attrs}>'
+           f'<div class="cname">{html.escape(c["name"] or dash)}{tag}{chev}'
+           f'<span class="csub">{sub}</span></div>'
+           f'<div class="cnum"><small>Kills</small>{c["kills"]:,}</div>')
+    if session_kills is not None:
+        out += f'<div class="cnum"><small>This session</small>{session_kills:,}</div>'
+    return out + '</div>'
+
+
+def _players_online_html():
+    """Currently connected players as an HTML fragment (no volatile values:
+    elapsed times are ticked client-side from data-since / data-base).
+    Collapsible parts carry data-toggle / data-key; the page script keeps
+    their open state across refreshes. A header only gets a toggle when
+    there is something behind it."""
+    online = _player_event_watcher.db.get_online()
+    if not online:
+        return (f'<p class="empty"><span class="tip" tabindex="0" data-tip="{html.escape(_PLAYERS_HELP, quote=True)}">'
+                'Nobody is connected right now.</span></p>')
+
+    cards = []
+    for o in online:
+        pkey = html.escape("p:" + o["steamid"], quote=True)
+        avatar_html = ""
+        if o["avatar_url"]:
+            avatar_html = f'<img src="{html.escape(o["avatar_url"], quote=True)}" alt="">'
+        profile_url = o["profile_url"] or f"https://steamcommunity.com/profiles/{o['steamid']}"
+        steam_val = (f'{o["pz_hours"]:,.0f} h' if o["pz_hours"] is not None else "Profile")
+        since = f'{o["joined_at"]:.0f}'
+        joined_txt = datetime.fromtimestamp(o["joined_at"]).strftime("%d %b %Y %H:%M")
+        n_acc = len(o["accounts"])
+
+        # The account in use stays visible; the rest sit behind the player bar.
+        in_use = [a for a in o["accounts"] if a["in_session"]] or o["accounts"][:1]
+        rest = [a for a in o["accounts"] if a not in in_use]
+
+        toggle = (f' fold" data-toggle="{pkey}" role="button" tabindex="0" '
+                  f'title="Show / hide this player\'s other accounts"') if rest else '"'
+        chev = '<i class="chev"></i>' if rest else ""
+        head = f"""<div class="phead{toggle}>
+            <div class="pname">{avatar_html}<a class="pn" href="{html.escape(profile_url, quote=True)}" target="_blank" rel="noopener noreferrer" title="Open Steam profile">{html.escape(o['persona'])}</a>{chev}</div>
+            <div class="pstats">
+                <div class="ps"><span class="pk">On Steam</span><span class="pv">{steam_val}</span></div>
+                <div class="ps"><span class="pk">{"Account" if n_acc == 1 else "Accounts"}</span><span class="pv">{n_acc}</span></div>
+                <div class="ps"><span class="pk">Lifetime kills</span><span class="pv">{o['lifetime_kills']:,}</span></div>
+                <div class="ps" title="Joined {html.escape(joined_txt)}"><span class="pk">Online for</span>
+                    <span class="pv tick" data-since="{since}" data-base="0"></span></div>
+                <div class="ps"><span class="pk">Total on server</span>
+                    <span class="pv tick" data-since="{since}" data-base="{o['total_seconds']:.0f}" data-fmt="total"></span></div>
+            </div>
+        </div>"""
+
+        def account_html(acc):
+            akey = html.escape("a:" + acc["username"], quote=True)
+            in_session = acc["in_session"]
+            n_other = len(acc["others"])
+            online_tag = '<span class="tag info">Online</span>' if in_session else ""
+            meta = f'{acc["kills"]:,} kills'
+            if n_other:
+                meta += f' · {n_other + 1} characters'
+            if not in_session and acc["last_seen"]:
+                meta += " · last seen " + datetime.fromtimestamp(
+                    acc["last_seen"]).strftime("%d %b %Y")
+            attrs = (f' fold" data-toggle="{akey}" role="button" tabindex="0" '
+                     f'title="Show / hide this account\'s other characters"') if n_other else '"'
+            chev = '<i class="chev"></i>' if n_other else ""
+            ahead = (f'<div class="ahead{attrs}><span class="aname">{html.escape(acc["username"])}</span>'
+                     f'{online_tag}<span class="ameta">{meta}</span>{chev}</div>')
+            has_detail = bool(in_session and acc["featured"] and acc["featured"]["alive"])
+            feat = _player_char_row(acc["featured"],
+                                    session_kills=o["session_kills"] if in_session else None,
+                                    collapse_key=("c:" + acc["username"]) if has_detail else None)
+            detail = ""
+            if has_detail:
+                detail = f'<div class="cdetail">{_live_details_html(o.get("live"), acc["username"])}</div>'
+            more = ""
+            if n_other:
+                more = (f'<div class="chars-more" data-key="{akey}">'
+                        + "".join(_player_char_row(c) for c in acc["others"]) + '</div>')
+            return f'<div class="acct">{ahead}{feat}{detail}{more}</div>'
+
+        visible = "".join(account_html(a) for a in in_use)
+        hidden = "".join(account_html(a) for a in rest)
+        others = f'<div class="others" data-key="{pkey}">{hidden}</div>' if rest else ""
+        cards.append(f'<div class="pcard">{head}{visible}{others}</div>')
+
+    count = len(online)
+    word = "player" if count == 1 else "players"
+    return f"""
+        <p class="eyebrow" style="margin:0 0 .8rem;letter-spacing:.06em;">{count} {word} online
+        <span class="tip" tabindex="0" data-tip="{html.escape(_PLAYERS_HELP, quote=True)}">&#9432;</span></p>
+        {"".join(cards)}
+    """
+
+
+# Polls /api/players and swaps the table in only when its content changed
+# (joins, quits, kills, character changes); elapsed times tick every second
+# from the server's clock. Skips polls while the tab is hidden.
+_PLAYERS_JS = """
+<script>
+(function(){
+  var box = document.getElementById('players');
+  var sig = box.getAttribute('data-sig');
+  var offset = parseFloat(box.getAttribute('data-now')) - Date.now() / 1000;
+  function dur(sec){
+    sec = Math.max(0, Math.floor(sec));
+    if (sec < 60) return sec + 's';
+    if (sec >= 86400) { var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600); return d + 'd' + (h ? ' ' + h + 'h' : ''); }
+    var out = [], units = [['d',86400],['h',3600],['m',60],['s',1]];
+    for (var i = 0; i < units.length; i++) { var v = Math.floor(sec / units[i][1]); sec -= v * units[i][1]; if (v) out.push(v + units[i][0]); }
+    return out.join(' ');
+  }
+  // Open/closed state of the collapsible parts survives refreshes (and reloads
+  // in this tab): keys are listed in openKeys, applied after every swap.
+  var openKeys = {};
+  try { openKeys = JSON.parse(sessionStorage.getItem('pzp-players-open') || '{}'); } catch (e) { openKeys = {}; }
+  function applyOpen(){
+    box.querySelectorAll('[data-toggle]').forEach(function(el){
+      el.classList.toggle('open', !!openKeys[el.getAttribute('data-toggle')]);
+    });
+    box.querySelectorAll('[data-key]').forEach(function(el){
+      el.classList.toggle('open', !!openKeys[el.getAttribute('data-key')]);
+    });
+  }
+  var lastLv = {}, flash = {};
+  function applyLevels(){
+    var now = Date.now();
+    box.querySelectorAll('.sk[data-sk]').forEach(function(el){
+      var k = el.getAttribute('data-sk'), lv = parseInt(el.getAttribute('data-lv'), 10) || 0;
+      if (lastLv[k] !== undefined && lv > lastLv[k]) flash[k] = now;
+      lastLv[k] = lv;
+      if (flash[k] && now - flash[k] < 4500) {
+        el.classList.add('lvlup');
+        el.style.setProperty('--el', ((now - flash[k]) / 1000) + 's');
+      }
+    });
+  }
+  function toggle(el){
+    var k = el.getAttribute('data-toggle');
+    if (openKeys[k]) { delete openKeys[k]; } else { openKeys[k] = true; }
+    try { sessionStorage.setItem('pzp-players-open', JSON.stringify(openKeys)); } catch (e) {}
+    applyOpen();
+  }
+  box.addEventListener('click', function(e){
+    if (e.target.closest('a')) return;
+    var t = e.target.closest('[data-toggle]');
+    if (t) toggle(t);
+  });
+  box.addEventListener('keydown', function(e){
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var t = e.target.closest('[data-toggle]');
+    if (t && e.target === t) { e.preventDefault(); toggle(t); }
+  });
+  function tick(){
+    var now = Date.now() / 1000 + offset;
+    box.querySelectorAll('.tick').forEach(function(el){
+      var el_s = now - parseFloat(el.getAttribute('data-since'));
+      var base = parseFloat(el.getAttribute('data-base')) || 0;
+      el.textContent = el.getAttribute('data-fmt') === 'ago' ? dur(el_s) + ' ago' : dur(el_s + base);
+    });
+  }
+  function poll(){
+    if (document.hidden) return;
+    fetch('/api/players').then(function(r){ return r.json(); }).then(function(d){
+      if (d.now) offset = d.now - Date.now() / 1000;
+      if (d.sig && d.sig !== sig) { sig = d.sig; box.innerHTML = d.html; applyOpen(); applyLevels(); }
+      tick();
+    }).catch(function(err){ console.error('players refresh failed', err); });
+  }
+  applyOpen();
+  applyLevels();
+  tick();
+  setInterval(tick, 1000);
+  setInterval(poll, 5000);
+  document.addEventListener('visibilitychange', poll);
+})();
+</script>
+"""
+
+
+@app.get("/players", response_class=HTMLResponse)
+def players_page():
+    if not pzp_mod_present(load_server_ini_path()):
+        return RedirectResponse(f"/mods/add?lookup={PZP_WORKSHOP_ID}", status_code=303)
+    if _player_event_watcher is None:
+        body = '<p class="note">Player-event tracking isn\'t running -- check that pzpanel.ini was readable at startup.</p>'
+        return _page("PZ Panel &mdash; Players", "players", body)
+    fragment = _players_online_html()
+    body = f"""
+        <div id="players" data-sig="{_killboard_sig(fragment)}" data-now="{time.time():.3f}">{fragment}</div>
+    """ + _PLAYERS_CSS + _PLAYERS_JS
+    return _page("PZ Panel &mdash; Players", "players", body)
+
+
+@app.get("/api/players")
+def api_players():
+    if _player_event_watcher is None:
+        return {"sig": None, "html": None, "now": time.time()}
+    fragment = _players_online_html()
+    return {"sig": _killboard_sig(fragment), "html": fragment, "now": time.time()}
+
+
 def _killboard_tables():
     """Killboard tables (or the empty-state note) as an HTML fragment."""
     players, characters = _player_event_watcher.db.get_killboard()
@@ -1016,15 +1546,14 @@ _KILLBOARD_JS = """
 
 @app.get("/killboard", response_class=HTMLResponse)
 def killboard_page():
+    if not pzp_mod_present(load_server_ini_path()):
+        return RedirectResponse(f"/mods/add?lookup={PZP_WORKSHOP_ID}", status_code=303)
     if _player_event_watcher is None:
         body = '<p class="note">Player-event tracking isn\'t running -- check that pzpanel.ini was readable at startup.</p>'
         return _page("PZ Panel &mdash; Killboard", "killboard", body)
     fragment = _killboard_tables()
     body = f"""
         <div id="killboard" data-sig="{_killboard_sig(fragment)}">{fragment}</div>
-        <p class="note">Updates automatically. Kills come from the PZP mod, which reports every
-        15 seconds while a character is killing and once on death; time on server updates
-        when a player disconnects.</p>
     """ + _KILLBOARD_JS
     return _page("PZ Panel &mdash; Killboard", "killboard", body)
 

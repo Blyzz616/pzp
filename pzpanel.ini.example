@@ -84,6 +84,11 @@ poll_interval = 0.5
 # Windows default: %LOCALAPPDATA%\pzpanel\pzp_kills.sqlite
 # kills_db =
 
+[players]
+# Optional: adds a "map" link next to each player's location on the Players
+# page. Any http(s) URL; {x} and {y} are replaced with the world position.
+# map_url = https://example.com/map#{x},{y}
+
 [steam]
 # Optional -- enriches join embeds with persona name, avatar, and (with
 # an api_key) PZ hours and "also played" games.

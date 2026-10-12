@@ -10,6 +10,12 @@ Zomboid/Lua/pzp_events.log:
   U  periodic update
   D  character died; kills/hours are the final values
 
+and, from mod v5.4.0, live status lines (shown on the Players page, never
+stored in the database):
+
+  v3|S|<account>|<x>|<y>|<z>|<health %>|<infected 0/1>|<asleep 0/1>|<vehicle>|
+       <weapon>|<profession>|<traits ;-separated>|<Skill:level ;-separated>|<total xp>
+
 The read position is stored in the database, so reports written while
 the panel is down are processed when it comes back. Once everything has
 been read and the file is over _ROTATE_BYTES it is truncated.
@@ -22,7 +28,7 @@ A milestone is announced once, for the highest threshold crossed between
 two consecutive reports (98 -> 103 announces 100).
 """
 
-__version__ = "5.3.0"
+__version__ = "5.6.3"
 
 import logging
 import threading
@@ -77,6 +83,50 @@ def parse_event(line):
     except ValueError:
         return None
     return kind, username, kills, hours, name.strip()
+
+
+def parse_status(line):
+    """
+    Parse a v3 live-status line. Returns (username, dict) or None. Unknown
+    or empty values come through as None/[] -- the mod sends -1 for health
+    it couldn't read and empty text for anything it couldn't look up.
+    """
+    parts = line.split("|", 14)
+    if len(parts) != 15 or parts[0] != "v3" or parts[1] != "S":
+        return None
+    (_, _, username, x, y, z, health, infected, asleep, vehicle, weapon,
+     profession, traits, skills, xp) = parts
+    username = username.strip()
+    if not username:
+        return None
+
+    def to_int(v, default=None):
+        try:
+            return int(float(v))
+        except ValueError:
+            return default
+
+    health_n = to_int(health, -1)
+    skill_list = []
+    for item in skills.split(";"):
+        name, _, rest = item.partition(":")
+        level, _, pct = rest.partition(":")
+        lvl = to_int(level, 0)
+        pct_n = max(0, min(99, to_int(pct, 0)))
+        if name.strip() and (lvl > 0 or pct_n > 0):
+            skill_list.append((name.strip(), lvl, pct_n))
+    return username, {
+        "x": to_int(x, 0), "y": to_int(y, 0), "z": to_int(z, 0),
+        "health": health_n if 0 <= health_n <= 100 else None,
+        "infected": infected.strip() == "1",
+        "asleep": asleep.strip() == "1",
+        "vehicle": vehicle.strip(),
+        "weapon": weapon.strip(),
+        "profession": profession.strip(),
+        "traits": [t.strip() for t in traits.split(";") if t.strip()],
+        "skills": skill_list,
+        "xp": max(0, to_int(xp, 0)),
+    }
 
 
 class KillTracker:
@@ -174,6 +224,11 @@ class KillTracker:
 
     def _process(self, line):
         """Apply one line. Returns a list of (callback, args) to run."""
+        if line.startswith("v3|"):
+            status = parse_status(line)
+            if status is not None:
+                self.db.set_live(status[0], status[1])
+            return []
         parsed = parse_event(line)
         if parsed is None:
             log.debug("KillTracker: skipping line %r", line)

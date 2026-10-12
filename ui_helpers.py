@@ -6,7 +6,7 @@ utilities with no FastAPI imports. They depend on server_config for
 load_server_config() and PAGE_STYLE.
 """
 
-__version__ = "5.3.0"
+__version__ = "5.6.3"
 
 import html
 import random
@@ -44,6 +44,8 @@ h1 { font-family:'Oswald',sans-serif; font-weight:700; font-size:2rem; letter-sp
 nav.tabs { display:flex; align-items:center; gap:1.5rem; margin-bottom:1.75rem; font-family:'JetBrains Mono',monospace; font-size:.78rem; letter-spacing:.06em; text-transform:uppercase; }
 nav.tabs a { color:var(--ink-dim); text-decoration:none; padding-bottom:.3rem; border-bottom:2px solid transparent; transition:color .15s,border-color .15s; }
 nav.tabs a:hover,nav.tabs a.active { color:var(--amber); border-color:var(--amber); }
+nav.tabs a.needs-mod { opacity:.4; border-bottom-style:dashed; }
+nav.tabs a.needs-mod:hover { opacity:.7; color:var(--ink-dim); border-color:var(--ink-dim); }
 nav.tabs a:focus-visible { outline:2px solid var(--amber); outline-offset:3px; }
 nav.tabs a.icon-tab { display:inline-flex; align-items:center; margin-left:auto; }
 nav.tabs a.icon-tab svg { display:block; }
@@ -73,6 +75,7 @@ td{padding:.7rem;border-bottom:1px solid var(--line);font-size:.9rem;vertical-al
 td.mono{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--ink-dim)}
 .tag{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;padding:.25rem .55rem;border-radius:2px;border:1px solid currentColor;background:transparent;white-space:nowrap;cursor:help}
 .tag.ok{color:var(--signal);background:rgba(111,191,90,.08)}.tag.warn{color:var(--amber);background:rgba(255,176,32,.08)}
+.tag.bad{color:var(--rust);background:rgba(200,80,50,.1)}
 .tag.info{color:#8fc4ea;background:rgba(58,127,184,.1)}.tag.muted{color:var(--ink-dim);background:rgba(139,145,121,.08)}
 .thumb{width:40px;height:40px;object-fit:cover;border-radius:2px;border:1px solid var(--line);display:block}
 .thumb-empty{background:#1a2016}.thumb-lg{width:96px;height:96px;object-fit:cover;border-radius:2px;border:1px solid var(--line);flex-shrink:0}
@@ -156,12 +159,33 @@ def _led_style(colour):
     return f"--led-colour:{colour}; animation-delay:{delay:.2f}s;"
 
 
+def _pzp_mod_missing():
+    """True when the PZP companion mod isn't in the server's mod manifest."""
+    try:
+        from modcheck import pzp_mod_present, PZP_WORKSHOP_ID
+        from server_config import load_server_ini_path
+        return (not pzp_mod_present(load_server_ini_path())), PZP_WORKSHOP_ID
+    except Exception:
+        return False, ""
+
+
 def page_shell(title, active_tab, body_html, extra_head="", version=""):
     server_name, _ = load_server_config()
+    mod_missing, mod_id = _pzp_mod_missing()
 
     def tab(href, label, key):
         cls = "active" if key == active_tab else ""
         return f'<a href="{href}" class="{cls}">{label}</a>'
+
+    def mod_tab(href, label, key, what):
+        """A tab that needs the PZP mod: greyed out while the mod is missing
+        from the manifest, and then it opens the add-mod page instead."""
+        if not mod_missing:
+            return tab(href, label, key)
+        tip = (f"{what} needs the PZP companion mod (Workshop ID {mod_id}), which isn't in "
+               f"the mod manifest yet. Click to add it.")
+        return (f'<a href="/mods/add?lookup={mod_id}" class="needs-mod" '
+                f'title="{html.escape(tip, quote=True)}">{label}</a>')
 
     def icon_tab(href, key, title_attr, svg):
         cls = "active icon-tab" if key == active_tab else "icon-tab"
@@ -201,9 +225,10 @@ def page_shell(title, active_tab, body_html, extra_head="", version=""):
         <h1>PZ Panel</h1>
         <nav class="tabs">
             {tab("/", "Status", "status")}
+            {mod_tab("/players", "Players", "players", "The Players page")}
             {tab("/config", "Config", "config")}
             {tab("/mods", "Mod Manifest", "mods")}
-            {tab("/killboard", "Killboard", "killboard")}
+            {mod_tab("/killboard", "Killboard", "killboard", "The Killboard")}
             {tab("/console", "Console", "console")}
             {tab("/log", "Log", "log")}
             {icon_tab("/settings", "settings", "Settings", cog_svg)}

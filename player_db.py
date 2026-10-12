@@ -26,7 +26,7 @@ Thread safety: a single lock guards every method; the connection is
 shared across threads.
 """
 
-__version__ = "5.3.0"
+__version__ = "5.6.3"
 
 import logging
 import sqlite3
@@ -104,6 +104,9 @@ class PlayerDB:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # Live status from the mod (position, health...) by account name.
+        # In memory only: it is meaningless once the session ends.
+        self._live = {}
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False,
                                      isolation_level=None)
         self._conn.row_factory = sqlite3.Row
@@ -288,6 +291,18 @@ class PlayerDB:
                 "SELECT name FROM personas WHERE steamid=?", (steamid,)).fetchone()
             return row["name"] if row else None
 
+    def _session_kills(self, sess):
+        """Kills made so far this session (caller holds the lock)."""
+        total = 0
+        for c in self._conn.execute(
+                "SELECT * FROM characters WHERE username=? AND (id=? OR first_seen>=?)",
+                (sess["username"], sess["start_char_id"], sess["joined_at"])):
+            if c["id"] == sess["start_char_id"]:
+                total += max(0, c["kills"] - sess["start_kills"])
+            else:
+                total += max(0, c["kills"] - c["pre_kills"])
+        return total
+
     # ------------------------------------------------------------------
     # Sessions
     # ------------------------------------------------------------------
@@ -334,14 +349,7 @@ class PlayerDB:
             username = sess["username"]
             joined_at = sess["joined_at"]
 
-            session_kills = 0
-            for c in self._conn.execute(
-                    "SELECT * FROM characters WHERE username=? AND (id=? OR first_seen>=?)",
-                    (username, sess["start_char_id"], joined_at)):
-                if c["id"] == sess["start_char_id"]:
-                    session_kills += max(0, c["kills"] - sess["start_kills"])
-                else:
-                    session_kills += max(0, c["kills"] - c["pre_kills"])
+            session_kills = self._session_kills(sess)
 
             alive = self._alive_character(username)
             died = self._conn.execute(
@@ -358,6 +366,7 @@ class PlayerDB:
                 "SELECT total_seconds FROM personas WHERE steamid=?",
                 (steamid,)).fetchone()["total_seconds"]
             self._conn.execute("DELETE FROM sessions WHERE steamid=?", (steamid,))
+            self._live.pop(username, None)
             return {
                 "username": username,
                 "duration": duration,
@@ -386,6 +395,100 @@ class PlayerDB:
                         "UPDATE personas SET total_seconds = total_seconds + ? "
                         "WHERE steamid=?", (max(0.0, now - s["joined_at"]), s["steamid"]))
             self._conn.execute("DELETE FROM sessions")
+            self._live.clear()
+
+    # ------------------------------------------------------------------
+    # Online players
+    # ------------------------------------------------------------------
+
+    def set_live(self, username, status, now=None):
+        """Record the latest live-status report for an account."""
+        with self._lock:
+            self._live[username] = dict(status, at=now or time.time())
+
+    def _account_blocks(self, steamid, session_username):
+        """Accounts of a persona with their characters (caller holds the lock)."""
+        blocks = []
+        accounts = self._conn.execute(
+            "SELECT username, last_seen FROM accounts WHERE steamid=?",
+            (steamid,)).fetchall()
+        for a in accounts:
+            chars = [{
+                "name": c["name"], "kills": c["kills"], "hours": c["hours"],
+                "alive": bool(c["alive"]), "died_at": c["died_at"],
+                "last_seen": c["last_seen"],
+            } for c in self._conn.execute(
+                "SELECT * FROM characters WHERE username=? "
+                "ORDER BY last_seen DESC, id DESC", (a["username"],))]
+            featured = next((c for c in chars if c["alive"]), chars[0] if chars else None)
+            blocks.append({
+                "username": a["username"],
+                "last_seen": a["last_seen"] or 0,
+                "in_session": a["username"] == session_username,
+                "kills": sum(c["kills"] for c in chars),
+                "featured": featured,
+                "others": [c for c in chars if c is not featured],
+            })
+        blocks.sort(key=lambda b: (not b["in_session"], -b["last_seen"]))
+        return blocks
+
+    def get_online(self):
+        """
+        One dict per open session (= currently connected player), oldest
+        join first:
+          steamid, username, joined_at, persona, avatar_url, profile_url,
+          pz_hours, total_seconds (closed sessions only -- add the current
+          one yourself), lifetime_kills, session_kills,
+          character -- {name, kills, hours, alive, last_seen} of the
+                       account's living character, else the one that died
+                       this session; None if the mod never reported one
+          accounts  -- every account linked to the persona, the one in use
+                       this session first, then most recently seen:
+                       [{username, last_seen, in_session, kills,
+                         featured, others}], where featured is the living
+                       character (else the most recently seen one; None if
+                       the account has none) and others the remaining
+                       characters, newest first. A character is
+                       {name, kills, hours, alive, died_at, last_seen}.
+          live      -- latest status report from the mod (see
+                       kill_tracker.parse_status, plus "at": epoch seconds)
+                       or None if none has arrived this session
+        """
+        with self._lock:
+            out = []
+            for s in self._conn.execute(
+                    "SELECT * FROM sessions ORDER BY joined_at").fetchall():
+                p = self._conn.execute(
+                    "SELECT * FROM personas WHERE steamid=?", (s["steamid"],)).fetchone()
+                alive = self._alive_character(s["username"])
+                shown = alive or self._conn.execute(
+                    "SELECT * FROM characters WHERE username=? AND alive=0 AND died_at>=? "
+                    "ORDER BY died_at DESC LIMIT 1",
+                    (s["username"], s["joined_at"])).fetchone()
+                out.append({
+                    "steamid": s["steamid"],
+                    "username": s["username"],
+                    "joined_at": s["joined_at"],
+                    "persona": (p["name"] if p and p["name"] else None) or s["steamid"],
+                    "avatar_url": p["avatar_url"] if p else None,
+                    "profile_url": p["profile_url"] if p else None,
+                    "pz_hours": p["pz_hours"] if p else None,
+                    "total_seconds": p["total_seconds"] if p else 0.0,
+                    "lifetime_kills": self._persona_kills(s["steamid"]),
+                    "session_kills": self._session_kills(s),
+                    "accounts": self._account_blocks(s["steamid"], s["username"]),
+                    "live": (self._live.get(s["username"])
+                             if (self._live.get(s["username"]) or {}).get("at", 0) >= s["joined_at"]
+                             else None),
+                    "character": None if shown is None else {
+                        "name": shown["name"],
+                        "kills": shown["kills"],
+                        "hours": shown["hours"],
+                        "alive": bool(shown["alive"]),
+                        "last_seen": shown["last_seen"],
+                    },
+                })
+            return out
 
     # ------------------------------------------------------------------
     # Meta

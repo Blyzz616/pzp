@@ -11,7 +11,7 @@ A mod has a pending update when its live time_updated is newer than
 what's recorded as installed in the ACF.
 """
 
-__version__ = "5.3.0"
+__version__ = "5.6.3"
 
 import configparser
 import os
@@ -38,6 +38,20 @@ def load_paths_config():
         cfg.get("paths", "workshop_acf",
                 fallback="/home/pzserver/pzserver/steamapps/workshop/appworkshop_108600.acf"),
     )
+
+
+PZP_WORKSHOP_ID = "3793020885"
+
+
+def pzp_mod_present(server_ini_path):
+    """True if the PZP companion mod is in WorkshopItems=. If the ini can't
+    be read we say True: don't lock pages because of an unrelated problem."""
+    if not server_ini_path:
+        return True
+    try:
+        return PZP_WORKSHOP_ID in get_configured_mod_ids(server_ini_path)
+    except (OSError, ModCheckError):
+        return True
 
 
 def get_configured_mod_ids(server_ini_path):

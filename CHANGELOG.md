@@ -9,6 +9,149 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.6.3] - 2026-10-10
+
+### Changed
+
+- Players page: the Steam profile link is now on the player's name; "On Steam"
+  hours are plain text. Clicking the name opens Steam; the rest of the header
+  still collapses/expands the player.
+
+## [5.6.2] - 2026-10-10
+
+### Fixed
+
+- Loading animation: squares fill one after another (about 0.5 s each, 6 s
+  cycle), all stay gold for 0.4 s, then empty together and restart.
+
+## [5.6.1] - 2026-10-10
+
+### Added
+
+- Players page: each skill group collapses (click its icon or title) and so
+  does a whole character (click the name row); state is remembered per tab.
+
+### Fixed
+
+- Loading animation: all squares now empty together before refilling.
+
+## [5.6.0] - 2026-10-10
+
+### Added
+
+- Players page: all skills shown like the in-game skill screen (same
+  groups and names, e.g. Foraging, ten squares per skill, grey progress bar
+  in the next square), collapsible per character. A skill flashes green and
+  fades to gold when it levels up.
+- Players page: traits tinted green (positive) or red (negative). The trait
+  list is built from memory of B42; unknown traits stay neutral.
+- Players page: "waiting for live status" is now an animated row of
+  skill squares.
+- Players and Killboard tabs grey out when the PZP mod (3793020885) is not in
+  `WorkshopItems=`; clicking opens the Add Mod page for it. The pages redirect
+  there too.
+- Mod: sends skill progress (`Name:level:percent`) for all 35 perks.
+  **Needs a Workshop update of the `pzp` mod** (older mods still work, just
+  without progress bars).
+
+### Changed
+
+- Players page help text moved into a tooltip (hover "Nobody is connected
+  right now", or the info icon when players are online).
+- Killboard help text removed; Status page: removed the graceful-stop note and
+  the `--` in the Danger Zone text.
+
+## [5.5.2] - 2026-10-10
+
+### Fixed
+
+- Mod: the live-status sender logged a Lua error every 15 s (empty hands
+  -> `getDisplayName` on nil; `getTraits` missing in B42). PZ logs errors
+  even when `pcall` catches them, so members are now checked before being
+  called. **Needs a Workshop update of the `pzp` mod.**
+
+## [5.5.1] - 2026-10-10
+
+### Changed
+
+- Players page redesigned: per-player stats tiles, a labelled live-status
+  panel (location, health bar, status tags, loadout, trait and skill chips)
+  and cleaner account/character rows.
+- Elapsed-time counters (online for, total on server, updated ago) now use
+  fixed-width tabular numbers and never wrap, so the page no longer jumps
+  when a value gains a digit.
+
+### Fixed
+
+- Collapsible headers use a `.fold` class; the old `.toggle` name clashed
+  with the panel's switch styling.
+
+## [5.5.0] - 2026-10-10
+
+### Changed
+
+- **Players page regrouped by Steam player, then account, then character,
+  with collapsible sections.**
+  - Each online player is a card with a centred, clickable name bar
+    (Steam profile link, hours on Steam, account count, lifetime kills,
+    time online and total time). Click it to show or hide the player's
+    other accounts.
+  - The account in use this session always stays visible, with the
+    character they're playing (kills, kills this session, in-game time
+    survived and the live mod status). Every other account linked to the
+    Steam profile sits behind the name bar, each with its living character
+    or, failing that, its most recently used one.
+  - Click an account that has more than one character to show the rest
+    (newest first, dead ones marked with their date of death).
+  - Open/closed state is remembered across the 5-second refreshes and page
+    reloads in the same browser tab.
+- `PlayerDB.get_online()` returns each persona's `accounts` with their
+  featured and other characters.
+
+## [5.4.1] - 2026-10-10
+
+### Fixed
+
+- **Players page overflowed its panel once live status arrived.** The
+  status items were set not to wrap, so a long trait or skills list
+  stretched the whole table past the panel edge and cut off columns. The
+  status row now wraps within the table.
+
+## [5.4.0] - 2026-10-09
+
+### Added
+
+- **Players page** (new tab between Status and Config): who is connected
+  right now. One row per player with their Steam persona (avatar, link,
+  hours on Steam), account name, character (name, alive/dead, in-game time
+  survived), run kills, session kills, lifetime kills across all linked
+  accounts, time online this session and total time on the server. The
+  table swaps in place within 5 seconds of a join, quit, kill-count change
+  or character change (same polling approach as the Killboard); the
+  "online for" and "total time" counters tick every second from the
+  server's clock.
+- **Live status from the mod** (needs the updated PZP mod -- republish it
+  to the Workshop and restart the server): under each player, location
+  (world x, y, floor, 300x300 cell), health %, infected / asleep tags,
+  vehicle, held weapon, profession, traits, top five skills, total XP and
+  how long ago it was reported. The mod sends a new `Status` command every
+  15 seconds; the server half writes it to `pzp_events.log` as
+  `v3|S|account|x|y|z|health|infected|asleep|vehicle|weapon|profession|traits|skills|xp`.
+  Every field is read inside `pcall`, so a game API that differs in some
+  build blanks that one field and never affects kill tracking. Old mod
+  versions keep working (the panel shows "No live status yet"); old panel
+  versions skip the `v3` lines.
+- Optional `[players] map_url` in `pzpanel.ini` (e.g. a URL containing
+  `{x}` and `{y}`) adds a "map" link next to the location. http/https only;
+  none by default.
+- `PlayerDB.get_online()` / `set_live()`, `kill_tracker.parse_status()`
+  and `/api/players`.
+
+### Changed
+
+- `PlayerDB.close_session()` now shares its session-kill calculation with
+  the Players page (`_session_kills()`); behaviour unchanged.
+
 ## [5.3.0] - 2026-10-06
 
 ### Added
