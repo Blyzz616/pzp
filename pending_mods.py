@@ -21,7 +21,7 @@ restart). Both call apply_pending() first.
 Same JSON-file-with-atomic-rename pattern as removed_mods.py.
 """
 
-__version__ = "5.6.3"
+__version__ = "5.7.0"
 
 import json
 import os
@@ -60,7 +60,7 @@ def _write(entries):
 
 def get_pending():
     """Returns the list, most-recently-queued first. Each entry has a
-    'kind' field ('workshop_add' or 'mods_enable') -- older entries
+    'kind' field ('workshop_add', 'mods_enable' or 'workshop_remove') -- older entries
     written before mods_enable existed default to 'workshop_add' via
     apply_pending()'s .get("kind", "workshop_add")."""
     return list(reversed(_read()))
@@ -94,6 +94,24 @@ def queue_mods_enable(mod_id, title, preview_url, internal_ids):
         "title": title,
         "preview_url": preview_url,
         "internal_ids": list(internal_ids),
+        "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
+    _write(entries)
+
+
+def queue_workshop_remove(mod_id, title, preview_url):
+    """
+    Queue removing mod_id (WorkshopItems= and its Mods= IDs) at the next
+    start/restart -- used by Remove & Restart when players are online, so
+    the removal waits for the in-game countdown. Drops any queued add or
+    enable for the same mod, which the removal would contradict.
+    """
+    entries = [e for e in _read() if e.get("mod_id") != str(mod_id)]
+    entries.append({
+        "kind": "workshop_remove",
+        "mod_id": str(mod_id),
+        "title": title,
+        "preview_url": preview_url,
         "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
     _write(entries)
@@ -148,6 +166,12 @@ def apply_pending():
                 modcheck.add_mods_line_items(ids)
                 log_action("modcheck", "apply-pending-mod",
                            f"Enabled (Mods=) at server start: {label} ({', '.join(ids)})")
+            elif kind == "workshop_remove":
+                import removed_mods
+                if modcheck.remove_workshop_item(mod_id):
+                    removed_mods.record_removed(mod_id, label, e.get("preview_url"))
+                log_action("modcheck", "apply-pending-mod",
+                           f"Removed (WorkshopItems=/Mods=) at server start: {label}")
             else:
                 modcheck.add_workshop_item(mod_id)
                 log_action("modcheck", "apply-pending-mod",

@@ -13,7 +13,7 @@ controls whether a check cycle starts at all, not an already-running
 countdown.
 """
 
-__version__ = "5.6.3"
+__version__ = "5.7.0"
 
 import configparser
 import os
@@ -35,9 +35,9 @@ CONFIG_PATH = os.environ.get("PZPANEL_CONFIG") or str(pc.get_default_config_path
 TICK_SECONDS = 1.0
 
 COUNTDOWN_SCHEDULE = [
-    (600, "Server restarting in 10 minutes to update: {mods}. Get to safety."),
-    (300, "Server restarting in 5 minutes to update: {mods}. Get to safety."),
-    (60,  "Server restarting in 1 minute to update: {mods}. Get to safety."),
+    (600, "Server restarting in 10 minutes to {purpose}: {mods}. Get to safety."),
+    (300, "Server restarting in 5 minutes to {purpose}: {mods}. Get to safety."),
+    (60,  "Server restarting in 1 minute to {purpose}: {mods}. Get to safety."),
     (30,  "Server restarting in 30 seconds."),
     (10,  "Server restarting in 10 seconds."),
     (5,   "5"),
@@ -170,10 +170,10 @@ def post_discord_mod_restart(cfg, updated_mods):
         print("mod_restart: discord announcement posted")
 
 
-def restart_server(cfg, reason):
+def restart_server(cfg, reason, actor="modcheck"):
     unit = cfg.get("server", "unit", fallback="pzserver")
     print(f"mod_restart: restarting server ({unit})")
-    log_action("modcheck", "restart", reason)
+    log_action(actor, "restart", reason)
     import pending_mods
     pending_mods.apply_pending()
     try:
@@ -183,7 +183,8 @@ def restart_server(cfg, reason):
         print(f"mod_restart: restart FAILED: {e}")
 
 
-def _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale=1.0, check_watchdog_pause=True):
+def _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale=1.0, check_watchdog_pause=True,
+                           purpose="update"):
     cc.write_countdown_state(target_epoch, mod_names)
     marks_remaining = list(COUNTDOWN_SCHEDULE)
     mods_str = ", ".join(mod_names)
@@ -234,7 +235,7 @@ def _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale=1.0, check_w
                                    f"{cc.format_remaining(paused_remaining)} remaining")
                         break
                     if cmd2.get("command") == "postpone":
-                        result = _handle_postpone(cfg, cmd2.get("target_epoch"), mod_names, time_scale)
+                        result = _handle_postpone(cfg, cmd2.get("target_epoch"), mod_names, time_scale, purpose)
                         if result == "postponed_invalid":
                             break
                         return result
@@ -248,7 +249,7 @@ def _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale=1.0, check_w
                 continue
 
             elif action == "postpone":
-                result = _handle_postpone(cfg, cmd.get("target_epoch"), mod_names, time_scale)
+                result = _handle_postpone(cfg, cmd.get("target_epoch"), mod_names, time_scale, purpose)
                 if result != "postponed_invalid":
                     return result
 
@@ -264,7 +265,8 @@ def _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale=1.0, check_w
 
         while marks_remaining and remaining <= marks_remaining[0][0] * time_scale:
             seconds_before, template = marks_remaining.pop(0)
-            message = template.format(mods=mods_str) if "{mods}" in template else template
+            message = (template.format(mods=mods_str, purpose=purpose)
+                       if "{mods}" in template else template)
             send_servermsg(cfg, message)
 
         time.sleep(min(TICK_SECONDS * time_scale, max(0.01, remaining)))
@@ -278,7 +280,7 @@ def run_countdown(cfg, mod_names, time_scale=1.0):
     return _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale, check_watchdog_pause=True)
 
 
-def _handle_postpone(cfg, target_epoch, mod_names, time_scale=1.0):
+def _handle_postpone(cfg, target_epoch, mod_names, time_scale=1.0, purpose="update", actor="modcheck"):
     cc.clear_countdown_state()
 
     if target_epoch is None:
@@ -308,7 +310,8 @@ def _handle_postpone(cfg, target_epoch, mod_names, time_scale=1.0):
         if cmd:
             action = cmd.get("command")
             if action == "postpone":
-                return _handle_postpone(cfg, cmd.get("target_epoch"), mod_names, time_scale)
+                return _handle_postpone(cfg, cmd.get("target_epoch"), mod_names, time_scale,
+                                        purpose, actor)
             if action == "cancel":
                 cc.clear_postponed_state()
                 set_paused(False)
@@ -324,10 +327,11 @@ def _handle_postpone(cfg, target_epoch, mod_names, time_scale=1.0):
     if player_count is not None and player_count == 0:
         print("mod_restart: no players online at the postponed warning window, restarting immediately")
         set_paused(False)
-        restart_server(cfg, f"Postponed mod update: {', '.join(mod_names)}")
+        restart_server(cfg, f"Postponed restart to {purpose}: {', '.join(mod_names)}", actor)
         return "postponed"
 
-    result = _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale, check_watchdog_pause=False)
+    result = _run_ticking_countdown(cfg, mod_names, target_epoch, time_scale, check_watchdog_pause=False,
+                                    purpose=purpose)
     if result == "cancelled":
         set_paused(False)
         return "cancelled"
@@ -335,13 +339,48 @@ def _handle_postpone(cfg, target_epoch, mod_names, time_scale=1.0):
         return "postponed"
 
     set_paused(False)
-    restart_server(cfg, f"Postponed mod update: {', '.join(mod_names)}")
+    restart_server(cfg, f"Postponed restart to {purpose}: {', '.join(mod_names)}", actor)
     return "postponed"
+
+
+def countdown_active(now=None):
+    """
+    True while a restart countdown is running (or paused) or a postponed
+    restart is scheduled. A countdown whose target passed more than two
+    minutes ago is treated as stale (its process died), not active.
+    """
+    now = now or time.time()
+    state = cc.get_countdown_state()
+    if state and (state.get("paused") or (state.get("target_epoch") or 0) > now - 120):
+        return True
+    postponed = cc.get_postponed_state()
+    return bool(postponed and (postponed.get("target_epoch") or 0) > now - 120)
+
+
+def run_restart_countdown(cfg, labels, purpose, reason, time_scale=1.0):
+    """
+    Admin-triggered restart with the same in-game warnings as a mod update
+    (10 min, 5 min, 1 min ... 1), pausable/postponable/cancellable from the
+    Status page. The change itself must already be queued in pending_mods;
+    restart_server() applies it. Used by the panel's Remove & Restart when
+    players are online. A cancelled countdown leaves the change queued for
+    the next restart.
+    """
+    target_epoch = time.time() + WARNING_WINDOW_SECONDS * time_scale
+    result = _run_ticking_countdown(cfg, labels, target_epoch, time_scale,
+                                    check_watchdog_pause=False, purpose=purpose)
+    if result == "completed":
+        restart_server(cfg, reason, actor="panel")
+    return result
 
 
 def run_mod_sync_cycle(time_scale=1.0, dry_run=False, force_countdown=False, simulate_update=False):
     if is_paused():
         print("mod_restart: automation is paused, skipping this cycle entirely")
+        return
+
+    if countdown_active():
+        print("mod_restart: a restart countdown is already running or scheduled, skipping this cycle")
         return
 
     cfg = load_config()

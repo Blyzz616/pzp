@@ -1,4 +1,4 @@
--- pzp kill tracker v5.6.3 (companion mod for PZ Panel)
+-- pzp kill tracker v5.7.0 (companion mod for PZ Panel)
 --
 -- Reports the local character's zombie kills and in-game hours survived
 -- to the server:

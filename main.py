@@ -13,7 +13,7 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "5.6.3"
+__version__ = "5.7.0"
 
 import asyncio
 import configparser
@@ -45,6 +45,7 @@ from automation import is_paused, set_paused
 import countdown_control as cc
 import removed_mods
 import pending_mods
+import mod_restart
 import discord_module
 from discord_module import _fmt_ingame_time
 import platform_compat as pc
@@ -450,8 +451,9 @@ def mods_page(request: Request):
         list_html = f'<p style="color:var(--rust);">Could not check mods: {html.escape(error)}</p>'
         reorder_script = ""
     else:
-        pending_enable_ids = {e.get("mod_id") for e in pending_mods.get_pending()
-                               if e.get("kind") == "mods_enable"}
+        pending_now = pending_mods.get_pending()
+        pending_enable_ids = {e.get("mod_id") for e in pending_now if e.get("kind") == "mods_enable"}
+        pending_remove_ids = {e.get("mod_id") for e in pending_now if e.get("kind") == "workshop_remove"}
         rows = []
         original_order = []
         for r in results:
@@ -460,7 +462,11 @@ def mods_page(request: Request):
             desc_snippet = description[:400]
             thumb_html, title_html = _mod_identity_cells(r['mod_id'], r['title'], r.get('preview_url'), description)
             is_queued_for_enable = r.get("needs_enable") and r["mod_id"] in pending_enable_ids
-            if is_queued_for_enable:
+            is_queued_for_remove = r["mod_id"] in pending_remove_ids
+            if is_queued_for_remove:
+                status_html = ('<span class="tag warn" title="Queued -- will be removed '
+                              'at the next server restart">Remove Queued</span>')
+            elif is_queued_for_enable:
                 status_html = ('<span class="tag warn" title="Queued -- will be added to Mods= '
                               'at the next server start or restart">Enable Queued</span>')
             else:
@@ -511,7 +517,8 @@ def mods_page(request: Request):
             title = e.get("title") or e.get("mod_id", "")
             mod_id = e.get("mod_id", "")
             kind = e.get("kind", "workshop_add")
-            kind_label = "Enable (Mods=)" if kind == "mods_enable" else "Add (WorkshopItems=)"
+            kind_label = {"mods_enable": "Enable (Mods=)",
+                          "workshop_remove": "Remove"}.get(kind, "Add (WorkshopItems=)")
             thumb_html, title_html = _mod_identity_cells(mod_id, title, e.get('preview_url'), "")
             pending_rows.append(f"""<tr>
                 <td>{thumb_html}</td><td>{title_html}</td>
@@ -614,7 +621,7 @@ def mods_page(request: Request):
                     </form></div></div></div>
         <script>
         var SERVER_ONLINE={str(not offline).lower()};
-        function openRemoveModal(btn){{var d=btn.dataset;var thumb=document.getElementById('modal-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('modal-title').textContent=d.title;document.getElementById('modal-id').textContent='Workshop ID '+d.modId;document.getElementById('modal-desc').innerHTML=d.description||'(no description)';document.getElementById('modal-mod-id-input').value=d.modId;document.getElementById('modal-title-input').value=d.title;document.getElementById('modal-preview-input').value=d.preview||'';var noteEl=document.getElementById('modal-online-note');var form=document.getElementById('modal-confirm-form');var confirmBtn=document.getElementById('modal-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online. Removing will stop, apply, and restart.';noteEl.style.display='block';form.action='/mods/remove-with-restart';confirmBtn.textContent='Restart & Remove';}}else{{noteEl.style.display='none';form.action='/mods/remove';confirmBtn.textContent='Confirm Remove';}}document.getElementById('modal-backdrop').classList.add('open');}}
+        function openRemoveModal(btn){{var d=btn.dataset;var thumb=document.getElementById('modal-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('modal-title').textContent=d.title;document.getElementById('modal-id').textContent='Workshop ID '+d.modId;document.getElementById('modal-desc').innerHTML=d.description||'(no description)';document.getElementById('modal-mod-id-input').value=d.modId;document.getElementById('modal-title-input').value=d.title;document.getElementById('modal-preview-input').value=d.preview||'';var noteEl=document.getElementById('modal-online-note');var form=document.getElementById('modal-confirm-form');var confirmBtn=document.getElementById('modal-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online. If anyone is connected (or the player count cannot be checked) they get the 10-minute restart countdown and the mod is removed at the restart; otherwise the server restarts now.';noteEl.style.display='block';form.action='/mods/remove-with-restart';confirmBtn.textContent='Restart & Remove';}}else{{noteEl.style.display='none';form.action='/mods/remove';confirmBtn.textContent='Confirm Remove';}}document.getElementById('modal-backdrop').classList.add('open');}}
         function closeRemoveModal(){{document.getElementById('modal-backdrop').classList.remove('open');}}
         function openDetailModal(btn){{var d=btn.dataset;var thumb=document.getElementById('detail-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('detail-title').textContent=d.title;document.getElementById('detail-meta').textContent='Workshop ID '+d.modId;document.getElementById('detail-desc').innerHTML=d.description||'(no description)';document.getElementById('detail-modal-backdrop').classList.add('open');}}
         function closeDetailModal(){{document.getElementById('detail-modal-backdrop').classList.remove('open');}}
@@ -622,7 +629,7 @@ def mods_page(request: Request):
         function closeReaddModal(){{document.getElementById('readd-modal-backdrop').classList.remove('open');}}
         document.addEventListener('keydown',function(e){{if(e.key==='Escape'){{closeRemoveModal();closeDetailModal();closeReaddModal();closeEnableModal();}}}});
         function deletePreviouslyRemoved(modId,btn){{if(!confirm('Remove "'+modId+'" from the previously-removed list?'))return;btn.disabled=true;btn.textContent='Removing\u2026';fetch('/mods/removed/delete',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'mod_id='+encodeURIComponent(modId)}}).then(function(r){{return r.json();}}).then(function(data){{if(data.ok){{var row=btn.closest('tr');if(row)row.remove();}}else{{btn.disabled=false;btn.textContent='Remove from list';alert('Failed: '+(data.error||'unknown error'));}}}}).catch(function(err){{btn.disabled=false;btn.textContent='Remove from list';alert('Request failed: '+err);}});}}
-        function cancelPendingMod(modId,kind,btn){{var label=(kind==='mods_enable'?'enabling':'addition');if(!confirm('Cancel queued '+label+' for "'+modId+'"?'))return;btn.disabled=true;btn.textContent='Cancelling\u2026';fetch('/mods/pending/cancel',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'mod_id='+encodeURIComponent(modId)+'&kind='+encodeURIComponent(kind)}}).then(function(r){{return r.json();}}).then(function(data){{if(data.ok){{var row=btn.closest('tr');if(row)row.remove();}}else{{btn.disabled=false;btn.textContent='Cancel';alert('Failed: '+(data.error||'unknown error'));}}}}).catch(function(err){{btn.disabled=false;btn.textContent='Cancel';alert('Request failed: '+err);}});}}
+        function cancelPendingMod(modId,kind,btn){{var label=(kind==='mods_enable'?'enabling':(kind==='workshop_remove'?'removal':'addition'));if(!confirm('Cancel queued '+label+' for "'+modId+'"?'))return;btn.disabled=true;btn.textContent='Cancelling\u2026';fetch('/mods/pending/cancel',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'mod_id='+encodeURIComponent(modId)+'&kind='+encodeURIComponent(kind)}}).then(function(r){{return r.json();}}).then(function(data){{if(data.ok){{var row=btn.closest('tr');if(row)row.remove();}}else{{btn.disabled=false;btn.textContent='Cancel';alert('Failed: '+(data.error||'unknown error'));}}}}).catch(function(err){{btn.disabled=false;btn.textContent='Cancel';alert('Request failed: '+err);}});}}
         function openEnableModal(btn){{var d=btn.dataset;var thumb=document.getElementById('enable-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('enable-title').textContent=d.title;var ids=[];try{{ids=JSON.parse(d.internalIds||'[]');}}catch(e){{ids=[];}}document.getElementById('enable-meta').textContent='Workshop ID '+d.modId+' \u00b7 Internal ID'+(ids.length>1?'s':'')+': '+ids.join(', ');document.getElementById('enable-mod-id-input').value=d.modId;document.getElementById('enable-title-input').value=d.title;document.getElementById('enable-preview-input').value=d.preview||'';document.getElementById('enable-ids-input').value=d.internalIds||'[]';buildEnablePicker(d.internalDetails);var noteEl=document.getElementById('enable-online-note');var form=document.getElementById('enable-confirm-form');var confirmBtn=document.getElementById('enable-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online -- this will be queued and applied at the next restart.';noteEl.style.display='block';form.action='/mods/enable/queue';confirmBtn.textContent='Queue for Next Restart';}}else{{noteEl.style.display='none';form.action='/mods/enable';confirmBtn.textContent='Confirm Enable';}}document.getElementById('enable-modal-backdrop').classList.add('open');}}
         function closeEnableModal(){{document.getElementById('enable-modal-backdrop').classList.remove('open');}}
         function buildEnablePicker(raw){{var box=document.getElementById('enable-picker');var hint=document.getElementById('enable-picker-hint');box.innerHTML='';var det=[];try{{det=JSON.parse(raw||'[]');}}catch(e){{det=[];}}if(det.length<2){{box.style.display='none';hint.style.display='none';return;}}det.forEach(function(m){{var lab=document.createElement('label');lab.className='checkbox-item';var cb=document.createElement('input');cb.type='checkbox';cb.value=m.id;cb.checked=!m.enabled;if(m.enabled)cb.disabled=true;var span=document.createElement('span');span.textContent=(m.name&&m.name!==m.id?m.name+' ':'')+'('+m.id+')'+(m.enabled?' -- already enabled':'');lab.appendChild(cb);lab.appendChild(span);box.appendChild(lab);}});box.style.display='block';hint.style.display='block';}}
@@ -800,6 +807,32 @@ def remove_mod_confirm(mod_id: str = Form(...), title: str = Form(""), preview_u
 
 @app.post("/mods/remove-with-restart")
 def remove_mod_with_restart(mod_id: str = Form(...), title: str = Form(""), preview_url: str = Form("")):
+    label = title or mod_id
+    if get_server_state() == "online":
+        # Same rules as a mod-update restart: anyone connected (or a player
+        # count RCON can't confirm) gets the 10-minute in-game countdown,
+        # and the removal waits in the pending queue for the restart.
+        if mod_restart.countdown_active():
+            pending_mods.queue_workshop_remove(mod_id, label, preview_url or None)
+            log_action("panel", "queue-remove",
+                       f"manual (panel) -- removal of {label} queued for the restart already scheduled")
+            qs = urllib.parse.urlencode({"msg": f"A restart is already counting down or scheduled -- "
+                                                f"{label} will be removed at that restart"})
+            return RedirectResponse(f"/mods?{qs}", status_code=303)
+        cfg = mod_restart.load_config()
+        players = mod_restart.get_player_count(cfg)
+        if players != 0:
+            pending_mods.queue_workshop_remove(mod_id, label, preview_url or None)
+            who = f"{players} player(s) online" if players else "player count unknown"
+            log_action("panel", "restart-countdown",
+                       f"manual (panel) -- removing {label}: {who}, 10-minute countdown")
+            threading.Thread(target=mod_restart.run_restart_countdown,
+                             args=(cfg, [label], "remove", f"manual (panel) -- removing mod {label}"),
+                             name="remove-countdown", daemon=True).start()
+            qs = urllib.parse.urlencode({"msg": f"{who} -- 10-minute restart countdown started; {label} "
+                                                f"will be removed at the restart. Pause, postpone or "
+                                                f"cancel it on the Status page."})
+            return RedirectResponse(f"/mods?{qs}", status_code=303)
     try:
         run_server_action("stop")
     except subprocess.TimeoutExpired:

@@ -8,7 +8,7 @@ Only captures actions initiated through this codebase -- a raw
 since the initiator is what actually knows *why* the action happened.
 """
 
-__version__ = "5.6.3"
+__version__ = "5.7.0"
 
 import json
 import os

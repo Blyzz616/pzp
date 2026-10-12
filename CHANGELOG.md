@@ -9,6 +9,44 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.7.0] - 2026-10-12
+
+### Added
+
+- **Remove & Restart respects connected players.** It used to stop the
+  server immediately. Now, with the server online:
+  - players connected, or a player count RCON can't confirm: the
+    removal is queued (new `workshop_remove` kind in `pending_mods`,
+    shown as "Remove Queued" on the mod and "Remove" in the queue) and
+    the same in-game countdown as a mod update runs (10 min, 5 min,
+    1 min, 30 s, 10 s, 5..1, "to remove: *mod*"). Pause, postpone and
+    cancel work from the Status page. At zero the server restarts and
+    `apply_pending()` removes the mod (WorkshopItems= and its Mods= IDs)
+    and records it under previously removed. Cancelling leaves the
+    removal queued for the next restart; it can be cancelled in the queue.
+  - nobody connected: unchanged (stop, remove, start).
+  - a countdown already running or a restart postponed: the removal is
+    queued for that restart instead of starting a second countdown.
+- `mod_restart.run_restart_countdown()` (admin-triggered countdown, run in
+  a panel thread) and `mod_restart.countdown_active()`. The scheduled
+  mod-update check now skips its cycle while a countdown is running or a
+  restart is postponed, so two countdowns can't overlap. A countdown
+  whose target passed over two minutes ago counts as stale.
+
+### Changed
+
+- Countdown messages take a purpose ("update" or "remove"); mod updates
+  read exactly as before. `restart_server()` takes the action-log actor
+  (panel-triggered restarts log as `panel`).
+- Status light: the online/starting/countdown LEDs pulse smoothly (2 s,
+  bright → dim → bright) instead of the irregular flicker, and all LEDs on
+  a page pulse in step (the random per-LED start offset is gone).
+
+### Notes
+
+- A panel restart during a Remove & Restart countdown ends the countdown
+  (it runs inside the panel); the removal stays queued.
+
 ## [5.6.3] - 2026-10-10
 
 ### Changed

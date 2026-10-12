@@ -6,7 +6,7 @@ utilities with no FastAPI imports. They depend on server_config for
 load_server_config() and PAGE_STYLE.
 """
 
-__version__ = "5.6.3"
+__version__ = "5.7.0"
 
 import html
 import random
@@ -52,8 +52,8 @@ nav.tabs a.icon-tab svg { display:block; }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:1.75rem; margin-bottom:25px; }
 .readout { display:flex; align-items:center; gap:.85rem; margin-bottom:1.75rem; flex-wrap:wrap; }
 .led { width:13px; height:13px; border-radius:50%; flex-shrink:0; background:var(--led-colour,var(--ink-dim)); box-shadow:0 0 10px 2px var(--led-colour,transparent); }
-.led.pulse { animation:ledpulse 1.7s ease-in-out infinite; }
-@keyframes ledpulse { 0%{opacity:1}8%{opacity:.4}10%{opacity:1}30%{opacity:.85}33%{opacity:1}55%{opacity:.3}60%{opacity:1}80%{opacity:.92}100%{opacity:1} }
+.led.pulse { animation:ledpulse 2s ease-in-out infinite; }
+@keyframes ledpulse { 0%,100%{opacity:1;box-shadow:0 0 10px 2px var(--led-colour,transparent)} 50%{opacity:.3;box-shadow:0 0 2px 0 var(--led-colour,transparent)} }
 @media(prefers-reduced-motion:reduce){.led.pulse{animation:none}}
 .readout-label { font-family:'JetBrains Mono',monospace; font-size:1rem; letter-spacing:.1em; text-transform:uppercase; }
 .readout-sub { font-family:'JetBrains Mono',monospace; font-size:.72rem; color:var(--ink-dim); margin-left:auto; }
@@ -154,9 +154,7 @@ code{font-family:'JetBrains Mono',monospace;background:#0d110a;padding:.1rem .35
 
 
 def _led_style(colour):
-    import random as _r
-    delay = _r.uniform(-1.6, 0)
-    return f"--led-colour:{colour}; animation-delay:{delay:.2f}s;"
+    return f"--led-colour:{colour};"
 
 
 def _pzp_mod_missing():
