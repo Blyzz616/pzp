@@ -13,7 +13,7 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "5.7.0"
+__version__ = "5.7.1"
 
 import asyncio
 import configparser
@@ -1168,6 +1168,9 @@ _PLAYERS_CSS = """
 .pk{font-size:.72rem;color:var(--ink-dim)}
 .pv{font-family:'JetBrains Mono',monospace;font-size:.95rem;color:var(--ink);white-space:nowrap}
 a.pn{text-decoration:none}a.pn:hover{text-decoration:underline}
+.phead.open~.pbody{display:none}
+.ahead.more-acc{border-top:1px solid var(--line);justify-content:center}
+.ahead.more-acc .ameta{margin-left:0}
 .others,.chars-more{display:none}
 .others.open,.chars-more.open{display:block}
 .acct{border-top:1px solid var(--line)}
@@ -1335,9 +1338,12 @@ def _players_online_html():
         in_use = [a for a in o["accounts"] if a["in_session"]] or o["accounts"][:1]
         rest = [a for a in o["accounts"] if a not in in_use]
 
-        toggle = (f' fold" data-toggle="{pkey}" role="button" tabindex="0" '
-                  f'title="Show / hide this player\'s other accounts"') if rest else '"'
-        chev = '<i class="chev"></i>' if rest else ""
+        # The player bar folds the whole card (open by default, like a
+        # character); other accounts have their own row inside it.
+        ckey = html.escape("pc:" + o["steamid"], quote=True)
+        toggle = (f' fold inv" data-toggle="{ckey}" role="button" tabindex="0" '
+                  f'title="Show / hide this player"')
+        chev = '<i class="chev"></i>'
         head = f"""<div class="phead{toggle}>
             <div class="pname">{avatar_html}<a class="pn" href="{html.escape(profile_url, quote=True)}" target="_blank" rel="noopener noreferrer" title="Open Steam profile">{html.escape(o['persona'])}</a>{chev}</div>
             <div class="pstats">
@@ -1382,8 +1388,15 @@ def _players_online_html():
 
         visible = "".join(account_html(a) for a in in_use)
         hidden = "".join(account_html(a) for a in rest)
-        others = f'<div class="others" data-key="{pkey}">{hidden}</div>' if rest else ""
-        cards.append(f'<div class="pcard">{head}{visible}{others}</div>')
+        others = ""
+        if rest:
+            n_rest = len(rest)
+            others = (f'<div class="ahead fold more-acc" data-toggle="{pkey}" role="button" tabindex="0" '
+                      f'title="Show / hide this player\'s other accounts">'
+                      f'<span class="ameta">{n_rest} other account{"s" if n_rest != 1 else ""}</span>'
+                      f'<i class="chev"></i></div>'
+                      f'<div class="others" data-key="{pkey}">{hidden}</div>')
+        cards.append(f'<div class="pcard">{head}<div class="pbody">{visible}{others}</div></div>')
 
     count = len(online)
     word = "player" if count == 1 else "players"

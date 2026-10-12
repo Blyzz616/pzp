@@ -11,7 +11,7 @@ A mod has a pending update when its live time_updated is newer than
 what's recorded as installed in the ACF.
 """
 
-__version__ = "5.7.0"
+__version__ = "5.7.1"
 
 import configparser
 import os

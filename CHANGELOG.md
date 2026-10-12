@@ -9,6 +9,22 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.7.1] - 2026-10-12
+
+### Fixed
+
+- Players page: clicking the player bar (anywhere but the Steam name)
+  did nothing for a player with a single account. The bar only folded
+  the player's *other* accounts, and with none it wasn't clickable. It
+  now folds the whole profile (accounts, characters, live status) like a
+  character row does: open by default, chevron flips, state kept across
+  refreshes. Verified in a browser against a local test panel.
+
+### Changed
+
+- A player's other accounts are behind their own "N other accounts" row
+  inside the card instead of behind the player bar.
+
 ## [5.7.0] - 2026-10-12
 
 ### Added

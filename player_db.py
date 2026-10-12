@@ -26,7 +26,7 @@ Thread safety: a single lock guards every method; the connection is
 shared across threads.
 """
 
-__version__ = "5.7.0"
+__version__ = "5.7.1"
 
 import logging
 import sqlite3
