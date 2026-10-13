@@ -15,7 +15,7 @@ This module owns:
   - Steam profile cache
 """
 
-__version__ = "5.8.0"
+__version__ = "5.8.1"
 
 import configparser
 import logging

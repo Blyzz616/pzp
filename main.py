@@ -13,7 +13,7 @@ CONFIG_PATH is defined in server_config.py and defaults to
 Override with PZPANEL_CONFIG environment variable.
 """
 
-__version__ = "5.8.0"
+__version__ = "5.8.1"
 
 import asyncio
 import configparser
@@ -577,9 +577,9 @@ def mods_page(request: Request):
                 <img id="modal-thumb" class="modal-thumb" src="" alt="" style="display:none;">
                 <p class="modal-title" id="modal-title"></p><p class="modal-meta" id="modal-id"></p>
                 <p class="modal-desc" id="modal-desc"></p>
-                <p class="modal-desc" id="modal-online-note" style="display:none;color:var(--amber);"></p>
-                <div class="modal-actions"><button type="button" class="btn" onclick="closeRemoveModal()">Cancel</button>
-                    <form method="post" id="modal-confirm-form" action="/mods/remove">
+                <div class="modal-actions" style="align-items:flex-start;"><button type="button" class="btn" onclick="closeRemoveModal()">Cancel</button>
+                    <form method="post" id="modal-confirm-form" action="/mods/remove"
+                        style="display:flex;flex-direction:column;align-items:flex-end;gap:.6rem;">
                         <input type="hidden" id="modal-mod-id-input" name="mod_id" value="">
                         <input type="hidden" id="modal-title-input" name="title" value="">
                         <input type="hidden" id="modal-preview-input" name="preview_url" value="">
@@ -623,7 +623,7 @@ def mods_page(request: Request):
                     </form></div></div></div>
         <script>
         var SERVER_ONLINE={str(not offline).lower()};
-        function openRemoveModal(btn){{var d=btn.dataset;var thumb=document.getElementById('modal-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('modal-title').textContent=d.title;document.getElementById('modal-id').textContent='Workshop ID '+d.modId;document.getElementById('modal-desc').innerHTML=d.description||'(no description)';document.getElementById('modal-mod-id-input').value=d.modId;document.getElementById('modal-title-input').value=d.title;document.getElementById('modal-preview-input').value=d.preview||'';var noteEl=document.getElementById('modal-online-note');var form=document.getElementById('modal-confirm-form');var confirmBtn=document.getElementById('modal-confirm-btn');if(SERVER_ONLINE){{noteEl.textContent='Server is online. If anyone is connected (or the player count cannot be checked) they get the 10-minute restart countdown and the mod is removed at the restart; otherwise the server restarts now. Remove at Next Restart leaves the server running and removes it the next time it starts or restarts.';noteEl.style.display='block';form.action='/mods/remove-with-restart';confirmBtn.textContent='Restart & Remove';document.getElementById('modal-queue-btn').style.display='';}}else{{noteEl.style.display='none';form.action='/mods/remove';confirmBtn.textContent='Confirm Remove';document.getElementById('modal-queue-btn').style.display='none';}}document.getElementById('modal-backdrop').classList.add('open');}}
+        function openRemoveModal(btn){{var d=btn.dataset;var thumb=document.getElementById('modal-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('modal-title').textContent=d.title;document.getElementById('modal-id').textContent='Workshop ID '+d.modId;document.getElementById('modal-desc').innerHTML=d.description||'(no description)';document.getElementById('modal-mod-id-input').value=d.modId;document.getElementById('modal-title-input').value=d.title;document.getElementById('modal-preview-input').value=d.preview||'';var form=document.getElementById('modal-confirm-form');var confirmBtn=document.getElementById('modal-confirm-btn');if(SERVER_ONLINE){{form.action='/mods/remove-with-restart';confirmBtn.textContent='Remove and Restart';document.getElementById('modal-queue-btn').style.display='';}}else{{form.action='/mods/remove';confirmBtn.textContent='Confirm Remove';document.getElementById('modal-queue-btn').style.display='none';}}document.getElementById('modal-backdrop').classList.add('open');}}
         function closeRemoveModal(){{document.getElementById('modal-backdrop').classList.remove('open');}}
         function openDetailModal(btn){{var d=btn.dataset;var thumb=document.getElementById('detail-thumb');if(d.preview){{thumb.src=d.preview;thumb.style.display='block';}}else{{thumb.style.display='none';}}document.getElementById('detail-title').textContent=d.title;document.getElementById('detail-meta').textContent='Workshop ID '+d.modId;document.getElementById('detail-desc').innerHTML=d.description||'(no description)';document.getElementById('detail-modal-backdrop').classList.add('open');}}
         function closeDetailModal(){{document.getElementById('detail-modal-backdrop').classList.remove('open');}}

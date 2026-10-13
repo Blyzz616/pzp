@@ -9,6 +9,16 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.8.1] - 2026-10-12
+
+### Changed
+
+- Mod Manifest remove dialog (server online): removed the yellow
+  explanatory note; "Restart & Remove" renamed **Remove and Restart**;
+  Remove at Next Restart and Remove and Restart are stacked and
+  right-aligned, with Cancel on the left at its normal height. Behaviour
+  unchanged. Checked in a browser.
+
 ## [5.8.0] - 2026-10-12
 
 ### Added

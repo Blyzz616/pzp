@@ -6,7 +6,7 @@ utilities with no FastAPI imports. They depend on server_config for
 load_server_config() and PAGE_STYLE.
 """
 
-__version__ = "5.8.0"
+__version__ = "5.8.1"
 
 import html
 import random
