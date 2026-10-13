@@ -7,7 +7,7 @@ the mod-checker (mod_restart.py), which runs as its own systemd oneshot
 service on a timer (Linux) or equivalent scheduled task (Windows).
 """
 
-__version__ = "5.7.1"
+__version__ = "5.8.0"
 
 import os
 from pathlib import Path

@@ -1,4 +1,4 @@
--- pzp kill tracker v5.7.1 (companion mod for PZ Panel)
+-- pzp kill tracker v5.8.0 (companion mod for PZ Panel)
 pzp = pzp or {}
 
 pzp.Module = "pzp"

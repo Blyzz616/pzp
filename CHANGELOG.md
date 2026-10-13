@@ -9,6 +9,25 @@ Dates below are approximate reconstructions from session timestamps
 the project's start -- treat day-level precision as best-effort, not
 exact.
 
+## [5.8.0] - 2026-10-12
+
+### Added
+
+- Mod Manifest: **Remove at Next Restart** in the remove dialog while the
+  server is online (beside Restart & Remove). Queues the removal
+  (`workshop_remove`, new route `/mods/remove/queue`) without restarting;
+  it is applied the next time the server starts or restarts, by the panel
+  or by a mod-update restart. The mod shows "Remove Queued" and the queue
+  lists it as "Remove", cancellable there. Hidden when the server is
+  offline (removal is immediate then). Verified in a browser against a
+  local test panel.
+
+### Fixed
+
+- Cancelling a queued change only removed its row from the queue table;
+  the mod's "Enable Queued" / "Remove Queued" tag stayed until a manual
+  reload. The Mods page now reloads after a successful cancel.
+
 ## [5.7.1] - 2026-10-12
 
 ### Fixed

@@ -28,7 +28,7 @@ A milestone is announced once, for the highest threshold crossed between
 two consecutive reports (98 -> 103 announces 100).
 """
 
-__version__ = "5.7.1"
+__version__ = "5.8.0"
 
 import logging
 import threading

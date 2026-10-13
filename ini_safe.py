@@ -14,7 +14,7 @@ Every panel edit of the server ini goes through safe_write_lines():
 A failed backup is logged and does not block the edit.
 """
 
-__version__ = "5.7.1"
+__version__ = "5.8.0"
 
 import logging
 import os
